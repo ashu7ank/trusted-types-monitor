@@ -1,0 +1,98 @@
+.detail-content::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.detail-content::-webkit-scrollbar-track {
+  background: rgba(241, 241, 241, 0.5);
+  border-radius: 4px;
+}
+
+.detail-content::-webkit-scrollbar-thumb {
+  background: rgba(136, 136, 136, 0.7);
+  border-radius: 4px;
+}
+
+.detail-content::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+.pre-wrap {
+  white-space: pre-wrap;
+  background-color: rgba(248, 249, 250, 0.9);
+  border: 1px solid #eaecef;
+  border-radius: 4px;
+  padding: 10px;
+  margin: 0;
+  font-family: monospace;
+  font-size: 0.85rem;
+  max-height: 250px !important;
+  overflow-y: auto;
+  line-height: 1.5;
+  color: #24292e;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.1);
+  width: 100%;
+  word-break: break-all;
+  position: relative;
+}
+
+.detail-value {
+  padding-right: 10px;
+  border-radius: 4px;
+  position: relative;
+}
+
+.detail-value.scrollable {
+  max-height: 100px;
+  overflow-y: auto;
+  padding: 5px;
+  background-color: rgba(248, 249, 250, 0.5);
+  border: 1px solid #eee;
+}
+
+/* Add visual indication to scrollable content */
+.detail-value.scrollable, .pre-wrap {
+  position: relative;
+}
+
+.detail-value.scrollable:after, .pre-wrap:after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  height: 15px;
+  width: 15px;
+  background-image: linear-gradient(45deg, #f0f0f0 25%, transparent 25%), 
+                    linear-gradient(-45deg, #f0f0f0 25%, transparent 25%), 
+                    linear-gradient(45deg, transparent 75%, #f0f0f0 75%), 
+                    linear-gradient(-45deg, transparent 75%, #f0f0f0 75%);
+  background-size: 6px 6px;
+  border-radius: 0 0 4px 0;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Special styling for sample code */
+.sample-code {
+  background-color: #f6f8fa;
+  border: 1px solid #ddd;
+  max-height: 300px !important;
+  font-size: 0.8rem;
+  tab-size: 2;
+}
+
+/* Improve the detail panel on smaller screens */
+@media (max-height: 600px) {
+  .detail-panel {
+    max-height: 95%;
+  }
+  
+  .pre-wrap, .sample-code {
+    max-height: 150px !important;
+  }
+  
+  .detail-content {
+    max-height: calc(95vh - 80px);
+  }
+}
+

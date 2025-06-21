@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Trusted Types Violation Report Handler</title>
+  <script>
+    // This page is a receiver for Trusted Types CSP violation reports
+    // It will attempt to forward reports to the extension
+    
+    window.addEventListener('load', function() {
+      // Signal to any observer that this page is ready to receive reports
+      document.body.setAttribute('data-ready', 'true');
+    });
+    
+    // Listen for POST data (violation reports are sent via POST)
+    window.addEventListener('message', function(event) {
+      console.log('Received message in report-violation page:', event.data);
+      
+      // Try to forward to extension if it's a violation report
+      if (event.data && event.data.violationReport) {
+        try {
+          chrome.runtime.sendMessage({
+            action: "reportViolation", 
+            violation: event.data.violationReport
+          });
+          console.log('Successfully forwarded violation to extension');
+        } catch (e) {
+          console.error('Failed to forward violation to extension:', e);
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <div id="report-handler">Trusted Types Violation Report Handler</div>
+</body>
+</html>

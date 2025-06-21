@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Trusted Types Monitor</title>
+  <link rel="stylesheet" href="css/popup.css">
+  <link rel="stylesheet" href="css/detail-enhancements.css">
+  <meta charset="UTF-8">
+</head>
+<body>
+  <div class="container">
+    <h1>Trusted Types Violations</h1>
+    
+    <div class="controls">
+      <div class="actions">
+        <button id="export-csv">Export CSV</button>
+        <button id="clear-all">Clear All Data</button>
+        <button id="refresh-data">Refresh Data</button>
+      </div>
+    </div>
+    
+    <div class="stats-panel">
+      <div class="stat-box">
+        <span class="stat-label">Total Violations:</span>
+        <span class="stat-value" id="total-violations">0</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-label">Unique URLs:</span>
+        <span class="stat-value" id="unique-urls">0</span>
+      </div>
+    </div>
+    
+    <div class="table-container">
+      <table id="violations-table">
+        <thead>
+          <tr>
+            <th data-sort="timestamp">Time</th>
+            <th data-sort="url">URL</th>
+            <th data-sort="directive">Directive</th>
+            <th data-sort="sourceFile">Source</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="violations-body">
+          <!-- Violations will be populated here -->
+        </tbody>
+      </table>
+    </div>
+    
+    <div class="pagination">
+      <button id="prev-page">Previous</button>
+      <span id="page-info">Page 1 of 1</span>
+      <button id="next-page">Next</button>
+    </div>
+    
+    <div id="violation-detail" class="detail-panel hidden">
+      <h3>Violation Details</h3>
+      <button class="close-button" id="close-detail">×</button>
+      <div class="detail-content">
+        <!-- Details will be populated here -->
+      </div>
+    </div>
+  </div>
+  
+  <script src="js/popup.js"></script>
+</body>
+</html>
