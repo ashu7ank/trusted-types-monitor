@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Trusted Types Violation Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+    button {
+      padding: 10px 15px;
+      margin: 10px 0;
+      background-color: #3498db;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #2980b9;
+    }
+    pre {
+      background-color: #f5f5f5;
+      padding: 10px;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+  <h1>Trusted Types Violation Test Page</h1>
+  <p>This page contains scripts that will trigger Trusted Types violations.</p>
+  
+  <h2>Test 1: innerHTML Violation</h2>
+  <button id="test-innerHTML">Test innerHTML Assignment</button>
+  <div id="output1"></div>
+  
+  <h2>Test 2: document.write Violation</h2>
+  <button id="test-document-write">Test document.write</button>
+  <div id="output2"></div>
+  
+  <h2>Test 3: eval Violation</h2>
+  <button id="test-eval">Test eval</button>
+  <div id="output3"></div>
+  
+  <h2>Results</h2>
+  <pre id="results">Run tests to see results here...</pre>
+  
+  <script>
+    // Function to append results
+    function appendResult(text) {
+      const results = document.getElementById('results');
+      results.textContent += text + "\n";
+    }
+    
+    // Test 1: innerHTML violation
+    document.getElementById('test-innerHTML').addEventListener('click', function() {
+      try {
+        const output = document.getElementById('output1');
+        output.innerHTML = "<script>console.log('This should cause a violation')<\/script>";
+        appendResult("Test 1 executed: innerHTML assignment");
+      } catch (e) {
+        appendResult("Test 1 error: " + e.message);
+      }
+    });
+    
+    // Test 2: document.write violation
+    document.getElementById('test-document-write').addEventListener('click', function() {
+      try {
+        const iframe = document.createElement('iframe');
+        document.getElementById('output2').appendChild(iframe);
+        iframe.contentDocument.write("<script>console.log('This should cause a violation')<\/script>");
+        appendResult("Test 2 executed: document.write");
+      } catch (e) {
+        appendResult("Test 2 error: " + e.message);
+      }
+    });
+    
+    // Test 3: eval violation
+    document.getElementById('test-eval').addEventListener('click', function() {
+      try {
+        const scriptString = "console.log('This should cause a violation')";
+        eval(scriptString);
+        appendResult("Test 3 executed: eval");
+      } catch (e) {
+        appendResult("Test 3 error: " + e.message);
+      }
+    });
+
+    // Let the page know it's ready
+    window.addEventListener('load', function() {
+      appendResult("Page loaded and ready for testing");
+      appendResult("Note: With the extension active, these operations should generate Trusted Types violations");
+    });
+  </script>
+</body>
+</html>
