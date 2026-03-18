@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Trusted Types Monitor - How to Test</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    h1, h2 {
+      color: #2980b9;
+    }
+    pre, code {
+      background-color: #f5f5f5;
+      padding: 5px;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-family: monospace;
+    }
+    pre {
+      padding: 10px;
+    }
+    .step {
+      margin-bottom: 20px;
+      padding: 10px;
+      background-color: #f9f9f9;
+      border-left: 4px solid #3498db;
+    }
+    .note {
+      background-color: #fdf7e3;
+      padding: 10px;
+      border-left: 4px solid #f1c40f;
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>How to Test the Trusted Types Monitor Extension</h1>
+  
+  <p>This guide will help you test whether the Trusted Types Monitor extension is correctly capturing violations.</p>
+  
+  <h2>Method 1: Using the Test Page</h2>
+  
+  <div class="step">
+    <h3>Step 1: Open the Test Page</h3>
+    <p>Open the <a href="test-page.html">Test Page</a> included with this extension.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 2: Click the Test Buttons</h3>
+    <p>The test page contains several buttons that will trigger different types of Trusted Types violations. Click each button to generate violations.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 3: Check the Extension Popup</h3>
+    <p>Click on the extension icon in your browser toolbar to open the popup. You should see the violations that were generated.</p>
+  </div>
+  
+  <h2>Method 2: Using the Browser Console</h2>
+  
+  <div class="step">
+    <h3>Step 1: Open a Web Page</h3>
+    <p>Navigate to any web page.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 2: Open the Developer Console</h3>
+    <p>Right-click on the page, select "Inspect" or "Inspect Element", and navigate to the "Console" tab.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 3: Generate a Test Violation</h3>
+    <p>Run the following command in the console:</p>
+    <pre>window._generateTrustedTypesViolation()</pre>
+    <p>This will generate a test violation that should be captured by the extension.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 4: Check the Extension Popup</h3>
+    <p>Click on the extension icon to see if the violation was captured.</p>
+  </div>
+  
+  <h2>Method 3: Visit Websites with DOM Manipulation</h2>
+  
+  <div class="step">
+    <h3>Step 1: Visit Interactive Websites</h3>
+    <p>Navigate to websites that use a lot of JavaScript and DOM manipulation, such as social media sites, web apps, or interactive content.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 2: Interact with the Website</h3>
+    <p>Use the website normally, clicking buttons, filling forms, etc. Many modern websites will trigger Trusted Types violations during normal usage.</p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 3: Check the Extension Popup</h3>
+    <p>Open the extension popup to see if any violations were captured.</p>
+  </div>
+  
+  <div class="note">
+    <strong>Note:</strong> If you're not seeing any violations, try clicking the "Refresh Data" button in the extension popup. Some violations may take a moment to be processed and stored.
+  </div>
+  
+  <div class="note">
+    <strong>Viewing Violation Details:</strong> Click the "Details" button next to any violation to see complete information. The details panel supports scrolling for long content and provides formatted display of code samples.
+  </div>
+  
+  <h2>Troubleshooting</h2>
+  
+  <p>If you're not seeing any violations:</p>
+  <ul>
+    <li>Make sure the extension is enabled</li>
+    <li>Check the browser console for any error messages</li>
+    <li>Try reloading the page</li>
+    <li>Try a different website</li>
+    <li>Make sure your browser supports Trusted Types (most modern browsers do)</li>
+  </ul>
+  
+  <p>If you continue to have issues, try restarting your browser or reinstalling the extension.</p>
+</body>
+</html>

@@ -1,0 +1,53 @@
+{
+  "name": "Trusted Types Monitor",
+  "description": "Monitor, analyze, and fix Trusted Types violations with DevTools panel, fix guidance, policy generator, and optional AI assistance",
+  "version": "3.0",
+  "manifest_version": 3,
+  "permissions": [
+    "storage",
+    "declarativeNetRequest",
+    "activeTab",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "js/background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "devtools_page": "devtools.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["js/content.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["js/content-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["report-violation"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://api.anthropic.com https://generativelanguage.googleapis.com https://api.openai.com"
+  }
+}

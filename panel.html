@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>TT Monitor</title>
+  <link rel="stylesheet" href="css/panel.css">
+</head>
+<body>
+  <div class="panel-app">
+    <header class="panel-header">
+      <div class="hdr-left">
+        <h1>TT Monitor</h1>
+        <label class="toggle-switch" title="Enable/disable monitoring">
+          <input type="checkbox" id="monitoring-toggle" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+      <div class="hdr-stats">
+        <div class="hstat"><span id="s-total" class="hstat-num">0</span><span class="hstat-lbl">total</span></div>
+        <div class="hstat"><span id="s-html" class="hstat-num type-c-html">0</span><span class="hstat-lbl">HTML</span></div>
+        <div class="hstat"><span id="s-script" class="hstat-num type-c-script">0</span><span class="hstat-lbl">Script</span></div>
+        <div class="hstat"><span id="s-url" class="hstat-num type-c-url">0</span><span class="hstat-lbl">URL</span></div>
+        <div class="hstat"><span id="s-clusters" class="hstat-num">0</span><span class="hstat-lbl">clusters</span></div>
+      </div>
+      <div class="hdr-actions">
+        <input type="text" id="search-input" placeholder="Filter violations..." class="search-box">
+        <button class="hdr-btn" id="btn-export" title="Export">Export</button>
+        <button class="hdr-btn danger" id="btn-clear" title="Clear tab violations">Clear</button>
+      </div>
+    </header>
+
+    <nav class="panel-tabs">
+      <button class="ptab active" data-tab="live">Live Stream</button>
+      <button class="ptab" data-tab="clusters">Clusters</button>
+      <button class="ptab" data-tab="fix">Fix Guide</button>
+      <button class="ptab" data-tab="policy">Policy Gen</button>
+      <button class="ptab" data-tab="ai">AI Assist</button>
+    </nav>
+
+    <!-- Live Stream -->
+    <div class="ptab-content active" id="pt-live">
+      <div class="live-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th data-sort="timestamp" class="sortable">Time</th>
+              <th data-sort="violationType" class="sortable">Type</th>
+              <th>Sample</th>
+              <th data-sort="sourceFile" class="sortable">Source</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="live-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Clusters -->
+    <div class="ptab-content" id="pt-clusters">
+      <div class="clusters-container" id="clusters-container"></div>
+    </div>
+
+    <!-- Fix Guide -->
+    <div class="ptab-content" id="pt-fix">
+      <div id="fix-intro">
+        <p class="intro-text">Click "Fix" on any violation, or choose a type below:</p>
+        <div class="fix-cards">
+          <div class="fcard" data-type="TrustedHTML"><span class="fcard-icon">&#x1f4c4;</span><strong>TrustedHTML</strong><br><small>innerHTML, outerHTML, document.write</small></div>
+          <div class="fcard" data-type="TrustedScript"><span class="fcard-icon">&#x26a0;</span><strong>TrustedScript</strong><br><small>eval, new Function, setTimeout string</small></div>
+          <div class="fcard" data-type="TrustedScriptURL"><span class="fcard-icon">&#x1f517;</span><strong>TrustedScriptURL</strong><br><small>script.src, Worker, import()</small></div>
+        </div>
+      </div>
+      <div id="fix-detail" class="hidden">
+        <button class="back-link" id="fix-back">&larr; Back</button>
+        <div id="fix-detail-body"></div>
+      </div>
+    </div>
+
+    <!-- Policy Generator -->
+    <div class="ptab-content" id="pt-policy">
+      <div class="policy-section">
+        <div class="policy-top">
+          <h2 id="policy-title">Generated Default Policy</h2>
+          <div class="policy-btns">
+            <div class="policy-mode-toggle">
+              <button class="mode-btn active" data-mode="standard" title="Traditional default policy with createHTML/createScript/createScriptURL">Standard</button>
+              <button class="mode-btn" data-mode="perfect-types" title="Zero-policy approach using setHTML() and Sanitizer API (modern browsers)">Perfect Types</button>
+            </div>
+            <button class="hdr-btn primary" id="btn-gen-policy">Generate</button>
+            <button class="hdr-btn" id="btn-copy-policy">Copy</button>
+          </div>
+        </div>
+        <div id="policy-mode-desc" class="policy-mode-desc">Generates a <code>default</code> Trusted Types policy with allowlists derived from observed violations.</div>
+        <pre class="policy-code" id="policy-output">// Click "Generate" to create a policy from observed violations</pre>
+        <div id="policy-warnings"></div>
+      </div>
+    </div>
+
+    <!-- AI Assist -->
+    <div class="ptab-content" id="pt-ai">
+      <div id="ai-setup-panel">
+        <h2>AI-Powered Analysis</h2>
+        <p>Provide your API key to enable AI analysis. Supports Claude, Gemini, and GPT.</p>
+        <div class="ai-form">
+          <select id="ai-provider"><option value="auto">Auto-detect</option><option value="claude">Claude</option><option value="gemini">Gemini</option><option value="gpt">GPT</option></select>
+          <div class="ai-key-row">
+            <input type="password" id="ai-key" placeholder="API key...">
+            <button class="hdr-btn" id="ai-eye">&#128065;</button>
+          </div>
+          <p class="hint">Stored locally. Only sent to the selected provider.</p>
+          <button class="hdr-btn primary" id="ai-save">Save & Connect</button>
+          <div id="ai-status" class="hidden"></div>
+        </div>
+      </div>
+      <div id="ai-chat-panel" class="hidden">
+        <div class="ai-chat-hdr">
+          <span id="ai-connected-label">Connected</span>
+          <button class="hdr-btn small" id="ai-settings">Settings</button>
+        </div>
+        <div class="ai-messages" id="ai-messages">
+          <div class="ai-msg bot"><p>Ready to help. Use quick actions or ask a question.</p></div>
+        </div>
+        <div class="ai-bottom">
+          <div class="ai-quick">
+            <button class="qbtn" data-q="Analyze all violations and prioritize fixes">Analyze All</button>
+            <button class="qbtn" data-q="Generate a production-ready default policy">Gen Policy</button>
+            <button class="qbtn" data-q="Which violations are most critical?">Critical</button>
+          </div>
+          <div class="ai-input-row">
+            <textarea id="ai-input" rows="2" placeholder="Ask about violations..."></textarea>
+            <button class="hdr-btn primary" id="ai-send">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail Sidebar -->
+    <div id="detail-sidebar" class="sidebar hidden">
+      <div class="sidebar-hdr">
+        <h3>Violation Details</h3>
+        <button class="close-x" id="sidebar-close">&times;</button>
+      </div>
+      <div class="sidebar-body" id="sidebar-body"></div>
+      <div class="sidebar-footer">
+        <button class="hdr-btn primary" id="sidebar-fix">Get Fix</button>
+        <button class="hdr-btn" id="sidebar-ai">Ask AI</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/ai-assistant.js"></script>
+  <script src="js/panel.js"></script>
+</body>
+</html>

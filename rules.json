@@ -1,0 +1,25 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "responseHeaders": [
+        {
+          "header": "Content-Security-Policy-Report-Only",
+          "operation": "set",
+          "value": "require-trusted-types-for 'script'; report-uri /trusted-types-violation; report-to csp-endpoint"
+        },
+        {
+          "header": "Reporting-Endpoints",
+          "operation": "set",
+          "value": "csp-endpoint=\"/trusted-types-violation\""
+        }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*",
+      "resourceTypes": ["main_frame", "sub_frame"]
+    }
+  }
+]
