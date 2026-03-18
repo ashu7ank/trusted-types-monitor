@@ -1,99 +1,258 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Trusted Types Violation Test</title>
+  <meta charset="UTF-8">
+  <title>Trusted Types Advanced Test Lab</title>
+
+  <!-- Toggle CSP modes here -->
+  <!-- ENFORCE MODE -->
+  <meta http-equiv="Content-Security-Policy"
+        content="require-trusted-types-for 'script'; trusted-types default unsafePolicy safePolicy;">
+
+  <!-- REPORT ONLY MODE (uncomment to test) -->
+  <!--
+  <meta http-equiv="Content-Security-Policy"
+        content="require-trusted-types-for 'script'; report-uri /report;">
+  -->
+
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    button {
-      padding: 10px 15px;
-      margin: 10px 0;
-      background-color: #3498db;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-    button:hover {
-      background-color: #2980b9;
-    }
-    pre {
-      background-color: #f5f5f5;
-      padding: 10px;
-      border-radius: 4px;
-      overflow-x: auto;
-    }
+    body { font-family: Arial; max-width: 1000px; margin: auto; padding: 20px; }
+    button { padding: 10px; margin: 5px; cursor: pointer; }
+    .danger { background: #e74c3c; color: white; }
+    .safe { background: #2ecc71; color: white; }
+    .run { background: #3498db; color: white; }
+    pre { background: #111; color: #0f0; padding: 10px; height: 300px; overflow-y: auto; }
+    .section { margin-top: 20px; }
   </style>
 </head>
-<body>
-  <h1>Trusted Types Violation Test Page</h1>
-  <p>This page contains scripts that will trigger Trusted Types violations.</p>
-  
-  <h2>Test 1: innerHTML Violation</h2>
-  <button id="test-innerHTML">Test innerHTML Assignment</button>
-  <div id="output1"></div>
-  
-  <h2>Test 2: document.write Violation</h2>
-  <button id="test-document-write">Test document.write</button>
-  <div id="output2"></div>
-  
-  <h2>Test 3: eval Violation</h2>
-  <button id="test-eval">Test eval</button>
-  <div id="output3"></div>
-  
-  <h2>Results</h2>
-  <pre id="results">Run tests to see results here...</pre>
-  
-  <script>
-    // Function to append results
-    function appendResult(text) {
-      const results = document.getElementById('results');
-      results.textContent += text + "\n";
-    }
-    
-    // Test 1: innerHTML violation
-    document.getElementById('test-innerHTML').addEventListener('click', function() {
-      try {
-        const output = document.getElementById('output1');
-        output.innerHTML = "<script>console.log('This should cause a violation')<\/script>";
-        appendResult("Test 1 executed: innerHTML assignment");
-      } catch (e) {
-        appendResult("Test 1 error: " + e.message);
-      }
-    });
-    
-    // Test 2: document.write violation
-    document.getElementById('test-document-write').addEventListener('click', function() {
-      try {
-        const iframe = document.createElement('iframe');
-        document.getElementById('output2').appendChild(iframe);
-        iframe.contentDocument.write("<script>console.log('This should cause a violation')<\/script>");
-        appendResult("Test 2 executed: document.write");
-      } catch (e) {
-        appendResult("Test 2 error: " + e.message);
-      }
-    });
-    
-    // Test 3: eval violation
-    document.getElementById('test-eval').addEventListener('click', function() {
-      try {
-        const scriptString = "console.log('This should cause a violation')";
-        eval(scriptString);
-        appendResult("Test 3 executed: eval");
-      } catch (e) {
-        appendResult("Test 3 error: " + e.message);
-      }
-    });
 
-    // Let the page know it's ready
-    window.addEventListener('load', function() {
-      appendResult("Page loaded and ready for testing");
-      appendResult("Note: With the extension active, these operations should generate Trusted Types violations");
-    });
-  </script>
+<body>
+
+<h1>🔥 Trusted Types Advanced Test Lab</h1>
+
+<div class="section">
+  <button class="run" onclick="runAllTests()">Run All Tests</button>
+  <button onclick="clearLogs()">Clear Logs</button>
+  <button onclick="exportLogs()">Export JSON</button>
+</div>
+
+<div class="section">
+  <h3>Manual Tests</h3>
+  <button class="danger" onclick="testInnerHTML()">innerHTML</button>
+  <button class="danger" onclick="testOuterHTML()">outerHTML</button>
+  <button class="danger" onclick="testInsertAdjacentHTML()">insertAdjacentHTML</button>
+  <button class="danger" onclick="testEval()">eval()</button>
+  <button class="danger" onclick="testSetTimeout()">setTimeout(string)</button>
+  <button class="danger" onclick="testFunction()">new Function()</button>
+  <button class="danger" onclick="testScriptSrc()">script.src=javascript:</button>
+  <button class="danger" onclick="testSrcdoc()">iframe.srcdoc</button>
+  <button class="safe" onclick="testSafePolicy()">Safe Policy</button>
+  <button class="danger" onclick="testUnsafePolicy()">Unsafe Policy</button>
+</div>
+
+<div class="section">
+  <h3>Results</h3>
+  <pre id="log"></pre>
+</div>
+
+<div id="output"></div>
+
+<script>
+/* ------------------ LOGGING ------------------ */
+
+let logs = [];
+
+function log(msg, type="INFO") {
+  const time = new Date().toISOString();
+  const entry = { time, type, msg };
+  logs.push(entry);
+  document.getElementById('log').textContent += `[${time}] [${type}] ${msg}\n`;
+}
+
+function clearLogs() {
+  logs = [];
+  document.getElementById('log').textContent = "";
+}
+
+function exportLogs() {
+  const blob = new Blob([JSON.stringify(logs, null, 2)], {type: "application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = "tt-results.json";
+  a.click();
+}
+
+/* ------------------ PAYLOADS ------------------ */
+
+const payloads = [
+  "<img src=x onerror=alert(1)>",
+  "<svg/onload=alert(1)>",
+  "<iframe srcdoc='<script>alert(1)<\/script>'>",
+  "javascript:alert(1)"
+];
+
+function getPayload() {
+  return payloads[Math.floor(Math.random() * payloads.length)];
+}
+
+/* ------------------ POLICIES ------------------ */
+
+let safePolicy, unsafePolicy;
+
+try {
+  safePolicy = trustedTypes.createPolicy('safePolicy', {
+    createHTML: (input) => input.replace(/onerror|onload|javascript:/gi, '')
+  });
+
+  unsafePolicy = trustedTypes.createPolicy('unsafePolicy', {
+    createHTML: (input) => {
+      log("Unsafe policy used with: " + input, "WARN");
+      return input;
+    }
+  });
+} catch (e) {
+  log("Policy creation failed: " + e.message, "ERROR");
+}
+
+/* ------------------ TESTS ------------------ */
+
+function testInnerHTML() {
+  try {
+    document.getElementById("output").innerHTML = getPayload();
+    log("innerHTML executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testOuterHTML() {
+  try {
+    document.getElementById("output").outerHTML = getPayload();
+    log("outerHTML executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testInsertAdjacentHTML() {
+  try {
+    document.body.insertAdjacentHTML("beforeend", getPayload());
+    log("insertAdjacentHTML executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testEval() {
+  try {
+    eval("alert(1)");
+    log("eval executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testSetTimeout() {
+  try {
+    setTimeout("alert(1)", 0);
+    log("setTimeout executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testFunction() {
+  try {
+    new Function("alert(1)")();
+    log("Function() executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testScriptSrc() {
+  try {
+    const s = document.createElement("script");
+    s.src = "javascript:alert(1)";
+    document.body.appendChild(s);
+    log("script.src executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testSrcdoc() {
+  try {
+    const iframe = document.createElement("iframe");
+    iframe.srcdoc = "<script>alert(1)<\/script>";
+    document.body.appendChild(iframe);
+    log("iframe.srcdoc executed");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testSafePolicy() {
+  try {
+    document.getElementById("output").innerHTML =
+      safePolicy.createHTML(getPayload());
+    log("Safe policy applied", "SAFE");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+function testUnsafePolicy() {
+  try {
+    document.getElementById("output").innerHTML =
+      unsafePolicy.createHTML(getPayload());
+    log("Unsafe policy applied", "WARN");
+  } catch (e) {
+    log(e.message, "BLOCKED");
+  }
+}
+
+/* ------------------ TEST RUNNER ------------------ */
+
+const tests = [
+  testInnerHTML,
+  testOuterHTML,
+  testInsertAdjacentHTML,
+  testEval,
+  testSetTimeout,
+  testFunction,
+  testScriptSrc,
+  testSrcdoc,
+  testUnsafePolicy,
+  testSafePolicy
+];
+
+function runAllTests() {
+  log("Running all tests...");
+  tests.forEach(fn => {
+    try { fn(); } catch (e) { log(e.message, "ERROR"); }
+  });
+}
+
+/* ------------------ CSP VIOLATION HOOK ------------------ */
+
+window.addEventListener('securitypolicyviolation', (e) => {
+  log(`CSP VIOLATION: ${e.violatedDirective} | ${e.blockedURI}`, "CSP");
+});
+
+/* ------------------ EXTENSION HOOK ------------------ */
+
+window.__tt_test_hook__ = (data) => {
+  log("Extension: " + JSON.stringify(data), "EXT");
+};
+
+/* ------------------ INIT ------------------ */
+
+window.onload = () => {
+  log("Test lab ready");
+};
+</script>
+
 </body>
 </html>
