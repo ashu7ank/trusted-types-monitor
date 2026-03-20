@@ -1,36 +1,50 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Trusted Types Violation Report Handler</title>
-  <script>
-    // This page is a receiver for Trusted Types CSP violation reports
-    // It will attempt to forward reports to the extension
-    
-    window.addEventListener('load', function() {
-      // Signal to any observer that this page is ready to receive reports
-      document.body.setAttribute('data-ready', 'true');
-    });
-    
-    // Listen for POST data (violation reports are sent via POST)
-    window.addEventListener('message', function(event) {
-      console.log('Received message in report-violation page:', event.data);
-      
-      // Try to forward to extension if it's a violation report
-      if (event.data && event.data.violationReport) {
-        try {
-          chrome.runtime.sendMessage({
-            action: "reportViolation", 
-            violation: event.data.violationReport
-          });
-          console.log('Successfully forwarded violation to extension');
-        } catch (e) {
-          console.error('Failed to forward violation to extension:', e);
-        }
-      }
-    });
-  </script>
+  <meta charset="UTF-8">
+  <title>TT Monitor</title>
+  <link rel="stylesheet" href="css/popup.css">
 </head>
 <body>
-  <div id="report-handler">Trusted Types Violation Report Handler</div>
+  <div class="popup">
+    <header>
+      <h1>TT Monitor</h1>
+      <label class="toggle" title="Enable/disable monitoring">
+        <input type="checkbox" id="toggle-enabled" checked>
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <div class="stats">
+      <div class="stat-card">
+        <span class="stat-val" id="p-total">0</span>
+        <span class="stat-label">Violations</span>
+      </div>
+      <div class="stat-card warn">
+        <span class="stat-val" id="p-critical">0</span>
+        <span class="stat-label">Critical</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-val" id="p-clusters">0</span>
+        <span class="stat-label">Clusters</span>
+      </div>
+    </div>
+
+    <div class="type-breakdown" id="type-breakdown"></div>
+
+    <div class="recent" id="recent-list">
+      <div class="empty">No violations on this tab yet.</div>
+    </div>
+
+    <div class="devtools-cta">
+      <p>Open <strong>DevTools &rarr; TT Monitor</strong> tab for the full experience: live stream, fix guidance, policy generator, and AI assistant.</p>
+    </div>
+
+    <div class="actions">
+      <button id="btn-export">Export CSV</button>
+      <button id="btn-clear" class="danger">Clear Tab</button>
+    </div>
+  </div>
+  <script src="js/popup.js"></script>
 </body>
 </html>
