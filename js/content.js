@@ -1,6 +1,7 @@
 // Content script (ISOLATED world) - captures CSP events and relays to background
 
 document.addEventListener('securitypolicyviolation', (e) => {
+  if (!chrome.runtime?.id) return;
   if (e.violatedDirective && e.violatedDirective.includes('trusted-types')) {
     chrome.runtime.sendMessage({
       action: "reportViolation",
@@ -13,7 +14,7 @@ document.addEventListener('securitypolicyviolation', (e) => {
         lineNumber: e.lineNumber || "unknown",
         columnNumber: e.columnNumber || "unknown",
         sample: e.sample || "unknown",
-        stackTrace: new Error().stack || ""
+        stackTrace: ""
       }
     });
   }
@@ -21,6 +22,7 @@ document.addEventListener('securitypolicyviolation', (e) => {
 
 if (window.ReportingObserver) {
   new ReportingObserver((reports) => {
+    if (!chrome.runtime?.id) return;
     for (const report of reports) {
       if (report.type === 'csp-violation' && report.body &&
           report.body.violatedDirective &&
@@ -43,31 +45,32 @@ if (window.ReportingObserver) {
   }, { buffered: true }).observe();
 }
 
-const meta = document.createElement('meta');
-meta.httpEquiv = 'Content-Security-Policy-Report-Only';
-meta.content = "require-trusted-types-for 'script'; report-uri /trusted-types-violation; report-to csp-endpoint";
-
-const reportingMeta = document.createElement('meta');
-reportingMeta.httpEquiv = 'Reporting-Endpoints';
-reportingMeta.content = 'csp-endpoint="/trusted-types-violation"';
-
-if (document.head) {
-  document.head.appendChild(meta);
-  document.head.appendChild(reportingMeta);
-} else {
-  new MutationObserver(function (_, obs) {
-    if (document.head) {
-      document.head.appendChild(meta);
-      document.head.appendChild(reportingMeta);
-      obs.disconnect();
-    }
-  }).observe(document.documentElement || document, { childList: true, subtree: true });
-}
-
 // Bridge: receive violations from MAIN world content-main.js
+// Validates structure to prevent arbitrary injection from page scripts.
 window.addEventListener('message', (event) => {
+  if (!chrome.runtime?.id) return;
   if (event.source !== window || event.data?.type !== '__tt_monitor__') return;
-  chrome.runtime.sendMessage({ action: "reportViolation", violation: event.data.violation });
+
+  const v = event.data.violation;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return;
+  if (typeof v.directive !== 'string' || !v.directive.includes('trusted-types')) return;
+
+  const str = (val, fallback) => typeof val === 'string' ? val : fallback;
+  chrome.runtime.sendMessage({
+    action: "reportViolation",
+    violation: {
+      timestamp: str(v.timestamp, new Date().toISOString()),
+      url: str(v.url, document.location.href),
+      directive: v.directive,
+      blockedUri: str(v.blockedUri, "unknown"),
+      sourceFile: str(v.sourceFile, "unknown"),
+      lineNumber: v.lineNumber || "unknown",
+      columnNumber: v.columnNumber || "unknown",
+      sample: str(v.sample, "unknown"),
+      stackTrace: str(v.stackTrace, ""),
+      detectedVia: str(v.detectedVia, "postMessage")
+    }
+  });
 });
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -76,13 +79,3 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   return true;
 });
-
-if (document.URL.includes('trusted-types-monitor-test') || document.URL.includes('test-page.html')) {
-  setTimeout(() => {
-    try {
-      const div = document.createElement('div');
-      div.innerHTML = "<script>console.log('test');<\/script>";
-      document.body.appendChild(div);
-    } catch {}
-  }, 1000);
-}

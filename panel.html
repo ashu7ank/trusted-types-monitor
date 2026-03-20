@@ -32,6 +32,7 @@
     <nav class="panel-tabs">
       <button class="ptab active" data-tab="live">Live Stream</button>
       <button class="ptab" data-tab="clusters">Clusters</button>
+      <button class="ptab" data-tab="insights">Insights</button>
       <button class="ptab" data-tab="fix">Fix Guide</button>
       <button class="ptab" data-tab="policy">Policy Gen</button>
       <button class="ptab" data-tab="ai">AI Assist</button>
@@ -45,8 +46,10 @@
             <tr>
               <th data-sort="timestamp" class="sortable">Time</th>
               <th data-sort="violationType" class="sortable">Type</th>
+              <th data-sort="sinkName" class="sortable">Sink</th>
               <th>Sample</th>
               <th data-sort="sourceFile" class="sortable">Source</th>
+              <th data-sort="party" class="sortable">Origin</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -58,6 +61,66 @@
     <!-- Clusters -->
     <div class="ptab-content" id="pt-clusters">
       <div class="clusters-container" id="clusters-container"></div>
+    </div>
+
+    <!-- Insights -->
+    <div class="ptab-content" id="pt-insights">
+      <div class="insights-scroll">
+
+        <!-- Origin Analysis -->
+        <section class="ins-section" id="ins-origin">
+          <h3 class="ins-title">Origin Analysis <span class="ins-subtitle">First-party vs Third-party</span></h3>
+          <div class="ins-origin-summary" id="origin-summary"></div>
+          <div class="ins-origin-bar" id="origin-bar"></div>
+          <div id="origin-details"></div>
+
+          <!-- First-Party Alias Configuration -->
+          <div class="alias-config" id="alias-config">
+            <div class="alias-hdr">
+              <h4>First-Party Domain Aliases</h4>
+              <button class="hdr-btn small" id="alias-suggest-btn" title="Auto-detect CDN and related domains">Auto-Suggest</button>
+            </div>
+            <p class="alias-desc">Domains listed here are treated as first-party (e.g. CDNs, asset hosts). This affects origin badges, scatter analysis, and AI context.</p>
+            <div id="alias-suggestions"></div>
+            <div class="alias-tags" id="alias-tags"></div>
+            <div class="alias-add-row">
+              <input type="text" id="alias-input" placeholder="e.g. cdn.example.com" class="alias-input">
+              <button class="hdr-btn" id="alias-add-btn">Add</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Sink Map -->
+        <section class="ins-section" id="ins-sinks">
+          <h3 class="ins-title">Sink Map <span class="ins-subtitle">Which DOM sinks are triggered and where</span></h3>
+          <div id="sink-map-content"></div>
+        </section>
+
+        <!-- Framework Detection -->
+        <section class="ins-section" id="ins-frameworks">
+          <h3 class="ins-title">Framework Detection <span class="ins-subtitle">Detected libraries and tailored guidance</span></h3>
+          <div id="framework-content"></div>
+        </section>
+
+        <!-- Scatter & Centralization -->
+        <section class="ins-section" id="ins-scatter">
+          <h3 class="ins-title">Centralization Analysis <span class="ins-subtitle">Policy scatter detection</span></h3>
+          <div id="scatter-content"></div>
+        </section>
+
+        <!-- Named Policy Recommendations -->
+        <section class="ins-section" id="ins-named-policies">
+          <h3 class="ins-title">Named Policy Recommendations <span class="ins-subtitle">Suggested policies based on violations</span></h3>
+          <div id="named-policies-content"></div>
+        </section>
+
+        <!-- CSP Header Generator -->
+        <section class="ins-section" id="ins-csp">
+          <h3 class="ins-title">CSP Header Generator <span class="ins-subtitle">Production-ready Content-Security-Policy</span></h3>
+          <div id="csp-content"></div>
+        </section>
+
+      </div>
     </div>
 
     <!-- Fix Guide -->
@@ -122,9 +185,11 @@
         </div>
         <div class="ai-bottom">
           <div class="ai-quick">
-            <button class="qbtn" data-q="Analyze all violations and prioritize fixes">Analyze All</button>
-            <button class="qbtn" data-q="Generate a production-ready default policy">Gen Policy</button>
-            <button class="qbtn" data-q="Which violations are most critical?">Critical</button>
+            <button class="qbtn" data-q="Analyze all violations by sink type and origin, prioritize fixes starting with first-party code">Analyze All</button>
+            <button class="qbtn" data-q="Review the recommended named policies and CSP header — are they sufficient for the observed violations?">Review Policies</button>
+            <button class="qbtn" data-q="Which violations are most critical? Consider sink severity, origin (first vs third party), and scatter across source files">Critical</button>
+            <button class="qbtn" data-q="Explain third-party risks and recommend wrapper policies or library alternatives for the detected third-party origins">3rd Party Risks</button>
+            <button class="qbtn" data-q="Based on the scatter analysis and detected frameworks, recommend a centralization strategy with framework-specific patterns">Centralize</button>
           </div>
           <div class="ai-input-row">
             <textarea id="ai-input" rows="2" placeholder="Ask about violations..."></textarea>

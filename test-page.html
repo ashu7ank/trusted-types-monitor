@@ -1,258 +1,499 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="UTF-8">
-  <title>Trusted Types Advanced Test Lab</title>
-
-  <!-- Toggle CSP modes here -->
-  <!-- ENFORCE MODE -->
-  <meta http-equiv="Content-Security-Policy"
-        content="require-trusted-types-for 'script'; trusted-types default unsafePolicy safePolicy;">
-
-  <!-- REPORT ONLY MODE (uncomment to test) -->
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!--
-  <meta http-equiv="Content-Security-Policy"
-        content="require-trusted-types-for 'script'; report-uri /report;">
+    NOTE: This test page must define a valid CSP itself.
+    The extension injects a Report-Only CSP via <meta>, but report directives
+    like report-uri / report-to are not allowed in meta CSP and may be ignored.
   -->
-
+  <meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types tt-monitor-demo;" />
+  <title>Trusted Types Monitor - Test Page</title>
   <style>
-    body { font-family: Arial; max-width: 1000px; margin: auto; padding: 20px; }
-    button { padding: 10px; margin: 5px; cursor: pointer; }
-    .danger { background: #e74c3c; color: white; }
-    .safe { background: #2ecc71; color: white; }
-    .run { background: #3498db; color: white; }
-    pre { background: #111; color: #0f0; padding: 10px; height: 300px; overflow-y: auto; }
-    .section { margin-top: 20px; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 20px 16px 48px;
+      color: #0f172a;
+      background: #ffffff;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+    p {
+      margin: 8px 0 0;
+      color: #334155;
+      line-height: 1.55;
+    }
+    a { color: #2563eb; }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin: 14px 0 18px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid #e2e8f0;
+      border-radius: 999px;
+      background: #f8fafc;
+      font-size: 13px;
+      color: #0f172a;
+    }
+    .chip b {
+      font-weight: 650;
+    }
+    .chip code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      color: #0f172a;
+      background: #eef2ff;
+      padding: 2px 6px;
+      border-radius: 999px;
+    }
+    .btn {
+      padding: 9px 12px;
+      border-radius: 10px;
+      border: 1px solid #dbeafe;
+      background: #eff6ff;
+      color: #1d4ed8;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .btn:hover { background: #dbeafe; }
+    .btn.secondary {
+      border-color: #e2e8f0;
+      background: #f8fafc;
+      color: #0f172a;
+    }
+    .btn.secondary:hover { background: #f1f5f9; }
+    .btn.danger {
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: #b91c1c;
+    }
+    .btn.danger:hover { background: #fee2e2; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      background: #ffffff;
+      padding: 14px;
+      box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04);
+    }
+    .card h2 {
+      font-size: 15px;
+      margin: 0 0 8px;
+    }
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: baseline;
+      color: #475569;
+      font-size: 13px;
+      margin: 0 0 10px;
+    }
+    .meta code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      padding: 2px 6px;
+      background: #f1f5f9;
+      border-radius: 8px;
+      color: #0f172a;
+    }
+    .out {
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px dashed #e2e8f0;
+      background: #f8fafc;
+      min-height: 48px;
+      overflow: auto;
+    }
+    pre {
+      margin-top: 14px;
+      background-color: #0b1020;
+      color: #e2e8f0;
+      padding: 12px 14px;
+      border-radius: 14px;
+      overflow-x: auto;
+      border: 1px solid #111827;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .hint {
+      margin-top: 6px;
+      font-size: 13px;
+      color: #475569;
+    }
+    .kbd {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-size: 12px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      border: 1px solid #e2e8f0;
+      background: #f8fafc;
+      color: #0f172a;
+    }
   </style>
 </head>
-
 <body>
+  <h1>Trusted Types Monitor Test Page</h1>
+  <p>
+    Use these buttons to trigger Trusted Types-related CSP violation reports (and/or enforcement errors),
+    which the extension should capture. This page also logs CSP violation events locally for quick feedback.
+  </p>
 
-<h1>🔥 Trusted Types Advanced Test Lab</h1>
+  <div class="row">
+    <button class="btn" id="run-all">Run all unsafe tests</button>
+    <button class="btn secondary" id="run-all-safe">Run all policy tests</button>
+    <button class="btn danger" id="clear-log">Clear log</button>
+    <span class="chip"><b>Trusted Types API</b> <code id="tt-support">checking…</code></span>
+    <span class="chip"><b>ReportingObserver</b> <code id="ro-support">checking…</code></span>
+    <span class="chip"><b>CSP</b> <code id="csp-status">checking…</code></span>
+    <span class="chip"><b>Tip</b> open DevTools Console <span class="kbd">⌥⌘I</span></span>
+  </div>
 
-<div class="section">
-  <button class="run" onclick="runAllTests()">Run All Tests</button>
-  <button onclick="clearLogs()">Clear Logs</button>
-  <button onclick="exportLogs()">Export JSON</button>
-</div>
+  <div class="grid">
+    <div class="card">
+      <h2>Unsafe HTML sinks (should report a TrustedHTML violation)</h2>
+      <div class="meta">
+        <span>Payload: <code id="html-payload-preview"></code></span>
+      </div>
+      <div class="row">
+        <button class="btn" data-test="innerHTML">innerHTML</button>
+        <button class="btn" data-test="insertAdjacentHTML">insertAdjacentHTML</button>
+        <button class="btn" data-test="outerHTML">outerHTML</button>
+        <button class="btn" data-test="rangeFragment">Range.createContextualFragment</button>
+        <button class="btn" data-test="domParser">DOMParser.parseFromString</button>
+        <button class="btn" data-test="iframeSrcdoc">iframe.srcdoc</button>
+        <button class="btn" data-test="documentWrite">iframe document.write</button>
+      </div>
+      <div class="out" id="html-output" aria-label="HTML sink output"></div>
+      <div class="hint">If CSP is enforcing, these may throw <span class="kbd">TypeError</span>; otherwise they’ll still run but should emit CSP violation reports.</div>
+    </div>
 
-<div class="section">
-  <h3>Manual Tests</h3>
-  <button class="danger" onclick="testInnerHTML()">innerHTML</button>
-  <button class="danger" onclick="testOuterHTML()">outerHTML</button>
-  <button class="danger" onclick="testInsertAdjacentHTML()">insertAdjacentHTML</button>
-  <button class="danger" onclick="testEval()">eval()</button>
-  <button class="danger" onclick="testSetTimeout()">setTimeout(string)</button>
-  <button class="danger" onclick="testFunction()">new Function()</button>
-  <button class="danger" onclick="testScriptSrc()">script.src=javascript:</button>
-  <button class="danger" onclick="testSrcdoc()">iframe.srcdoc</button>
-  <button class="safe" onclick="testSafePolicy()">Safe Policy</button>
-  <button class="danger" onclick="testUnsafePolicy()">Unsafe Policy</button>
-</div>
+    <div class="card">
+      <h2>Unsafe script sinks (should report TrustedScript / TrustedScriptURL)</h2>
+      <div class="meta">
+        <span>Payload: <code id="js-payload-preview"></code></span>
+        <span>URL: <code id="url-payload-preview"></code></span>
+      </div>
+      <div class="row">
+        <button class="btn" data-test="eval">eval(string)</button>
+        <button class="btn" data-test="newFunction">new Function(string)</button>
+        <button class="btn" data-test="timeoutString">setTimeout(string)</button>
+        <button class="btn" data-test="scriptText">script.text = string</button>
+        <button class="btn" data-test="scriptSrc">script.src = string</button>
+      </div>
+      <div class="out" id="js-output" aria-label="Script sink output"></div>
+      <div class="hint">If you also set a separate CSP <span class="kbd">script-src</span> that forbids <span class="kbd">'unsafe-eval'</span>, <span class="kbd">eval</span>/<span class="kbd">Function</span> may be blocked for a different reason.</div>
+    </div>
 
-<div class="section">
-  <h3>Results</h3>
-  <pre id="log"></pre>
-</div>
+    <div class="card">
+      <h2>Policy-based (should not report a Trusted Types violation)</h2>
+      <div class="meta">
+        <span>Policy name: <code>tt-monitor-demo</code></span>
+        <span>Note: policy is intentionally permissive for demo purposes</span>
+      </div>
+      <div class="row">
+        <button class="btn secondary" data-test="safeInnerHTML">innerHTML with TrustedHTML</button>
+        <button class="btn secondary" data-test="safeScriptText">script.text with TrustedScript</button>
+        <button class="btn secondary" data-test="safeScriptSrc">script.src with TrustedScriptURL</button>
+      </div>
+      <div class="out" id="safe-output" aria-label="Policy output"></div>
+      <div class="hint">If your CSP restricts allowed policy names (via <span class="kbd">trusted-types</span> directive), policy creation may fail.</div>
+    </div>
 
-<div id="output"></div>
+    <div class="card">
+      <h2>Log</h2>
+      <p class="hint">This log includes local <span class="kbd">securitypolicyviolation</span> / <span class="kbd">ReportingObserver</span> output plus any thrown errors.</p>
+      <pre id="results">Ready. Click a test button.</pre>
+    </div>
+  </div>
 
-<script>
-/* ------------------ LOGGING ------------------ */
+  <script>
+    const results = document.getElementById('results');
+    const htmlOutput = document.getElementById('html-output');
+    const jsOutput = document.getElementById('js-output');
+    const safeOutput = document.getElementById('safe-output');
 
-let logs = [];
+    const htmlPayload = `<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" onload="console.log('xss:img-onload')" />`;
+    const jsPayload = `console.log("tt-test: executed string sink");`;
+    const scriptUrlPayload = `data:text/javascript,console.log("tt-test: loaded script src");`;
 
-function log(msg, type="INFO") {
-  const time = new Date().toISOString();
-  const entry = { time, type, msg };
-  logs.push(entry);
-  document.getElementById('log').textContent += `[${time}] [${type}] ${msg}\n`;
-}
+    document.getElementById('html-payload-preview').textContent = htmlPayload;
+    document.getElementById('js-payload-preview').textContent = jsPayload;
+    document.getElementById('url-payload-preview').textContent = scriptUrlPayload;
 
-function clearLogs() {
-  logs = [];
-  document.getElementById('log').textContent = "";
-}
-
-function exportLogs() {
-  const blob = new Blob([JSON.stringify(logs, null, 2)], {type: "application/json"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = "tt-results.json";
-  a.click();
-}
-
-/* ------------------ PAYLOADS ------------------ */
-
-const payloads = [
-  "<img src=x onerror=alert(1)>",
-  "<svg/onload=alert(1)>",
-  "<iframe srcdoc='<script>alert(1)<\/script>'>",
-  "javascript:alert(1)"
-];
-
-function getPayload() {
-  return payloads[Math.floor(Math.random() * payloads.length)];
-}
-
-/* ------------------ POLICIES ------------------ */
-
-let safePolicy, unsafePolicy;
-
-try {
-  safePolicy = trustedTypes.createPolicy('safePolicy', {
-    createHTML: (input) => input.replace(/onerror|onload|javascript:/gi, '')
-  });
-
-  unsafePolicy = trustedTypes.createPolicy('unsafePolicy', {
-    createHTML: (input) => {
-      log("Unsafe policy used with: " + input, "WARN");
-      return input;
+    function ts() {
+      return new Date().toISOString().replace('T', ' ').replace('Z', '');
     }
-  });
-} catch (e) {
-  log("Policy creation failed: " + e.message, "ERROR");
-}
 
-/* ------------------ TESTS ------------------ */
+    function log(line) {
+      const prefix = `[${ts()}] `;
+      if (results.textContent === 'Ready. Click a test button.') results.textContent = '';
+      results.textContent += prefix + line + "\n";
+    }
 
-function testInnerHTML() {
-  try {
-    document.getElementById("output").innerHTML = getPayload();
-    log("innerHTML executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    function clearOutputs() {
+      htmlOutput.replaceChildren();
+      jsOutput.replaceChildren();
+      safeOutput.replaceChildren();
+    }
 
-function testOuterHTML() {
-  try {
-    document.getElementById("output").outerHTML = getPayload();
-    log("outerHTML executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    function formatViolationEvent(e) {
+      return [
+        `directive=${e.violatedDirective || "unknown"}`,
+        `blockedURI=${e.blockedURI || "unknown"}`,
+        `source=${e.sourceFile || "unknown"}:${e.lineNumber || "?"}:${e.columnNumber || "?"}`,
+        `sample=${JSON.stringify(e.sample || "unknown")}`
+      ].join(" | ");
+    }
 
-function testInsertAdjacentHTML() {
-  try {
-    document.body.insertAdjacentHTML("beforeend", getPayload());
-    log("insertAdjacentHTML executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    window.addEventListener('securitypolicyviolation', (e) => {
+      if ((e.violatedDirective || "").includes("trusted-types")) {
+        log(`CSP event (trusted-types): ${formatViolationEvent(e)}`);
+      }
+    });
 
-function testEval() {
-  try {
-    eval("alert(1)");
-    log("eval executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    if (window.ReportingObserver) {
+      try {
+        new ReportingObserver((reports) => {
+          for (const r of reports) {
+            if (r.type === "csp-violation" && r.body &&
+              String(r.body.violatedDirective || "").includes("trusted-types")) {
+              log(`ReportingObserver (trusted-types): directive=${r.body.violatedDirective || "unknown"} | blockedURI=${r.body.blockedURI || "unknown"} | sample=${JSON.stringify(r.body.sample || "unknown")}`);
+            }
+          }
+        }, { buffered: true }).observe();
+      } catch (e) {
+        log(`ReportingObserver setup failed: ${e && e.message ? e.message : String(e)}`);
+      }
+    }
 
-function testSetTimeout() {
-  try {
-    setTimeout("alert(1)", 0);
-    log("setTimeout executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    window.addEventListener('error', (e) => {
+      const msg = e?.error?.message || e?.message || "unknown error";
+      log(`window.error: ${msg}`);
+    });
 
-function testFunction() {
-  try {
-    new Function("alert(1)")();
-    log("Function() executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    window.addEventListener('unhandledrejection', (e) => {
+      const msg = e?.reason?.message || String(e?.reason || "unknown rejection");
+      log(`unhandledrejection: ${msg}`);
+    });
 
-function testScriptSrc() {
-  try {
-    const s = document.createElement("script");
-    s.src = "javascript:alert(1)";
-    document.body.appendChild(s);
-    log("script.src executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    function getDemoPolicy() {
+      if (!window.trustedTypes || !trustedTypes.createPolicy) return null;
+      try {
+        return trustedTypes.createPolicy('tt-monitor-demo', {
+          createHTML: (s) => s,
+          createScript: (s) => s,
+          createScriptURL: (s) => s
+        });
+      } catch (e) {
+        log(`Policy creation failed: ${e && e.message ? e.message : String(e)}`);
+        return null;
+      }
+    }
 
-function testSrcdoc() {
-  try {
-    const iframe = document.createElement("iframe");
-    iframe.srcdoc = "<script>alert(1)<\/script>";
-    document.body.appendChild(iframe);
-    log("iframe.srcdoc executed");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    const tests = {
+      innerHTML() {
+        htmlOutput.innerHTML = htmlPayload;
+        log("Ran: innerHTML (unsafe)");
+      },
+      insertAdjacentHTML() {
+        htmlOutput.insertAdjacentHTML('beforeend', htmlPayload);
+        log("Ran: insertAdjacentHTML (unsafe)");
+      },
+      outerHTML() {
+        const box = document.createElement('div');
+        box.textContent = "outerHTML target";
+        htmlOutput.appendChild(box);
+        box.outerHTML = `<div class="replaced">${htmlPayload}</div>`;
+        log("Ran: outerHTML (unsafe)");
+      },
+      rangeFragment() {
+        const frag = document.createRange().createContextualFragment(htmlPayload);
+        htmlOutput.appendChild(frag);
+        log("Ran: Range.createContextualFragment (unsafe)");
+      },
+      domParser() {
+        const doc = new DOMParser().parseFromString(htmlPayload, 'text/html');
+        const note = document.createElement('div');
+        note.textContent = `DOMParser created document with body length=${(doc.body && doc.body.innerHTML ? doc.body.innerHTML.length : 0)}`;
+        htmlOutput.appendChild(note);
+        log("Ran: DOMParser.parseFromString (unsafe)");
+      },
+      iframeSrcdoc() {
+        const iframe = document.createElement('iframe');
+        iframe.style.width = "100%";
+        iframe.style.height = "70px";
+        iframe.style.border = "1px solid #e2e8f0";
+        iframe.style.borderRadius = "10px";
+      // Keep same-origin so the test can access contentDocument even on file://
+      iframe.sandbox = "allow-scripts allow-same-origin";
+        iframe.srcdoc = `<div>srcdoc content: ${htmlPayload}</div>`;
+        htmlOutput.appendChild(iframe);
+        log("Ran: iframe.srcdoc (unsafe)");
+      },
+      documentWrite() {
+        const iframe = document.createElement('iframe');
+        iframe.style.width = "100%";
+        iframe.style.height = "70px";
+        iframe.style.border = "1px solid #e2e8f0";
+        iframe.style.borderRadius = "10px";
+      // Keep same-origin so contentDocument write is allowed on file://
+      iframe.sandbox = "allow-scripts allow-same-origin";
+        htmlOutput.appendChild(iframe);
+        const d = iframe.contentDocument;
+        d.open();
+        d.write(`<div>document.write content: ${htmlPayload}</div>`);
+        d.close();
+        log("Ran: iframe document.write (unsafe)");
+      },
+      eval() {
+        eval(jsPayload);
+        jsOutput.textContent = "eval executed (check console).";
+        log("Ran: eval(string) (unsafe)");
+      },
+      newFunction() {
+        new Function(jsPayload)();
+        jsOutput.textContent = "new Function executed (check console).";
+        log("Ran: new Function(string) (unsafe)");
+      },
+      timeoutString() {
+        setTimeout(jsPayload, 0);
+        jsOutput.textContent = "setTimeout(string) scheduled (check console).";
+        log("Ran: setTimeout(string) (unsafe)");
+      },
+      scriptText() {
+        const s = document.createElement('script');
+        s.text = jsPayload;
+        document.body.appendChild(s);
+        jsOutput.textContent = "script.text appended (check console).";
+        log("Ran: script.text=string (unsafe)");
+      },
+      scriptSrc() {
+        const s = document.createElement('script');
+        s.src = scriptUrlPayload;
+        document.body.appendChild(s);
+        jsOutput.textContent = "script.src appended (check console).";
+        log("Ran: script.src=string (unsafe)");
+      },
+      safeInnerHTML() {
+        const policy = getDemoPolicy();
+        if (!policy) {
+          safeOutput.textContent = "Skipped: Trusted Types not available or policy creation failed.";
+          log("Skipped: safe innerHTML (no Trusted Types policy)");
+          return;
+        }
+        safeOutput.innerHTML = policy.createHTML(`<b>TrustedHTML inserted.</b> ${htmlPayload}`);
+        log("Ran: innerHTML with TrustedHTML (policy)");
+      },
+      safeScriptText() {
+        const policy = getDemoPolicy();
+        if (!policy) {
+          safeOutput.textContent = "Skipped: Trusted Types not available or policy creation failed.";
+          log("Skipped: safe script.text (no Trusted Types policy)");
+          return;
+        }
+        const s = document.createElement('script');
+        s.text = policy.createScript(`console.log("tt-test: TrustedScript executed");`);
+        document.body.appendChild(s);
+        safeOutput.textContent = "TrustedScript assigned to script.text (check console).";
+        log("Ran: script.text with TrustedScript (policy)");
+      },
+      safeScriptSrc() {
+        const policy = getDemoPolicy();
+        if (!policy) {
+          safeOutput.textContent = "Skipped: Trusted Types not available or policy creation failed.";
+          log("Skipped: safe script.src (no Trusted Types policy)");
+          return;
+        }
+        const s = document.createElement('script');
+        s.src = policy.createScriptURL(scriptUrlPayload);
+        document.body.appendChild(s);
+        safeOutput.textContent = "TrustedScriptURL assigned to script.src (check console).";
+        log("Ran: script.src with TrustedScriptURL (policy)");
+      }
+    };
 
-function testSafePolicy() {
-  try {
-    document.getElementById("output").innerHTML =
-      safePolicy.createHTML(getPayload());
-    log("Safe policy applied", "SAFE");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    function runTest(name) {
+      try {
+        tests[name]();
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        log(`Error in ${name}: ${msg}`);
+      }
+    }
 
-function testUnsafePolicy() {
-  try {
-    document.getElementById("output").innerHTML =
-      unsafePolicy.createHTML(getPayload());
-    log("Unsafe policy applied", "WARN");
-  } catch (e) {
-    log(e.message, "BLOCKED");
-  }
-}
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-test]');
+      if (!btn) return;
+      runTest(btn.getAttribute('data-test'));
+    });
 
-/* ------------------ TEST RUNNER ------------------ */
+    document.getElementById('run-all').addEventListener('click', () => {
+      clearOutputs();
+      [
+        "innerHTML",
+        "insertAdjacentHTML",
+        "outerHTML",
+        "rangeFragment",
+        "domParser",
+        "iframeSrcdoc",
+        "documentWrite",
+        "eval",
+        "newFunction",
+        "timeoutString",
+        "scriptText",
+        "scriptSrc"
+      ].forEach(runTest);
+      log("Completed: Run all unsafe tests");
+    });
 
-const tests = [
-  testInnerHTML,
-  testOuterHTML,
-  testInsertAdjacentHTML,
-  testEval,
-  testSetTimeout,
-  testFunction,
-  testScriptSrc,
-  testSrcdoc,
-  testUnsafePolicy,
-  testSafePolicy
-];
+    document.getElementById('run-all-safe').addEventListener('click', () => {
+      [
+        "safeInnerHTML",
+        "safeScriptText",
+        "safeScriptSrc"
+      ].forEach(runTest);
+      log("Completed: Run all policy tests");
+    });
 
-function runAllTests() {
-  log("Running all tests...");
-  tests.forEach(fn => {
-    try { fn(); } catch (e) { log(e.message, "ERROR"); }
-  });
-}
+    document.getElementById('clear-log').addEventListener('click', () => {
+      results.textContent = "Ready. Click a test button.";
+      clearOutputs();
+    });
 
-/* ------------------ CSP VIOLATION HOOK ------------------ */
+    document.getElementById('tt-support').textContent =
+      (typeof window.trustedTypes !== "undefined" && !!trustedTypes?.createPolicy) ? "available" : "not available";
+    document.getElementById('ro-support').textContent =
+      (typeof window.ReportingObserver !== "undefined") ? "available" : "not available";
+    (function setCspStatus() {
+      const meta = document.querySelector('meta[http-equiv="Content-Security-Policy" i]');
+      const content = meta?.getAttribute('content') || "";
+      const ok = content.includes("require-trusted-types-for 'script'");
+      document.getElementById('csp-status').textContent = ok ? "TT required" : "missing";
+    })();
 
-window.addEventListener('securitypolicyviolation', (e) => {
-  log(`CSP VIOLATION: ${e.violatedDirective} | ${e.blockedURI}`, "CSP");
-});
-
-/* ------------------ EXTENSION HOOK ------------------ */
-
-window.__tt_test_hook__ = (data) => {
-  log("Extension: " + JSON.stringify(data), "EXT");
-};
-
-/* ------------------ INIT ------------------ */
-
-window.onload = () => {
-  log("Test lab ready");
-};
-</script>
-
+    log("Page loaded. Click a test button to generate Trusted Types violation reports.");
+  </script>
 </body>
 </html>
