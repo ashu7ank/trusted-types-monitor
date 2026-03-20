@@ -7,6 +7,9 @@ let recentHashes = new Map();
 let monitoringEnabled = true;
 let storeInFlight = false;
 const recentlyClearedTabs = new Set();
+let firstPartyAliases = [];
+let aliasesReady = false;
+let pendingViolationQueue = [];
 
 // ── Deduplication ──
 
@@ -34,6 +37,11 @@ function isDuplicate(violation) {
 function processViolation(violation, tabId) {
   if (!monitoringEnabled) return;
 
+  if (!aliasesReady) {
+    pendingViolationQueue.push({ violation, tabId });
+    return;
+  }
+
   const normalized = {
     timestamp: violation.timestamp || new Date().toISOString(),
     url: violation.url || "unknown",
@@ -48,6 +56,15 @@ function processViolation(violation, tabId) {
     tabId: tabId > 0 ? tabId : -1,
     violationType: inferViolationType(violation)
   };
+
+  const sinkInfo = extractSinkInfo(normalized);
+  normalized.sinkName = sinkInfo.sinkName;
+  normalized.sinkCategory = sinkInfo.sinkCategory;
+  normalized.sourceLocation = sinkInfo.sourceLocation;
+
+  const originClass = classifyOrigin(normalized);
+  normalized.party = originClass.party;
+  normalized.sourceOrigin = originClass.sourceOrigin;
 
   if (isDuplicate(normalized)) return;
 
@@ -507,12 +524,618 @@ function buildPerfectTypesCode(htmlAnalysis, htmlSinkNames, scriptList, urlList)
   return l.join("\n");
 }
 
+// ── Named Policy Recommendations ──
+
+function recommendNamedPolicies(violations) {
+  const htmlViolations = violations.filter(v => (v.violationType || inferViolationType(v)) === "TrustedHTML");
+  const scriptViolations = violations.filter(v => (v.violationType || inferViolationType(v)) === "TrustedScript");
+  const urlViolations = violations.filter(v => (v.violationType || inferViolationType(v)) === "TrustedScriptURL");
+
+  const policies = [];
+  const policyNames = [];
+
+  if (htmlViolations.length > 0) {
+    const richHtml = htmlViolations.filter(v => {
+      const s = (v.sample || "").toLowerCase();
+      return /<(img|video|iframe|table|div|p|h[1-6]|ul|ol|li|a|span|br|em|strong)\b/i.test(s);
+    });
+    const simpleHtml = htmlViolations.filter(v => {
+      const s = (v.sample || "").toLowerCase();
+      return !/<(img|video|iframe|table|div|p|h[1-6]|ul|ol|li|a|span|br|em|strong)\b/i.test(s);
+    });
+
+    if (richHtml.length > 0 && simpleHtml.length > 0) {
+      policies.push({
+        name: "app-rich-html",
+        type: "TrustedHTML",
+        description: "For rich content (WYSIWYG editors, blog posts, user-generated HTML)",
+        violationCount: richHtml.length,
+        code: buildNamedHtmlPolicy("app-rich-html", richHtml, true)
+      });
+      policies.push({
+        name: "app-sanitize-html",
+        type: "TrustedHTML",
+        description: "For simple HTML insertion (notifications, UI fragments)",
+        violationCount: simpleHtml.length,
+        code: buildNamedHtmlPolicy("app-sanitize-html", simpleHtml, false)
+      });
+      policyNames.push("app-rich-html", "app-sanitize-html");
+    } else {
+      policies.push({
+        name: "app-html",
+        type: "TrustedHTML",
+        description: "Sanitizes all HTML assignments using DOMPurify",
+        violationCount: htmlViolations.length,
+        code: buildNamedHtmlPolicy("app-html", htmlViolations, richHtml.length > 0)
+      });
+      policyNames.push("app-html");
+    }
+  }
+
+  if (urlViolations.length > 0) {
+    const origins = new Set();
+    for (const v of urlViolations) {
+      const urlStr = v.blockedUri !== "unknown" ? v.blockedUri : (v.sample || "");
+      if (urlStr && urlStr !== "unknown") {
+        try { origins.add(new URL(urlStr).origin); } catch {}
+      }
+    }
+    policies.push({
+      name: "app-script-url",
+      type: "TrustedScriptURL",
+      description: "Controls dynamic script loading with origin allowlist",
+      violationCount: urlViolations.length,
+      detectedOrigins: [...origins],
+      code: buildNamedUrlPolicy("app-script-url", [...origins])
+    });
+    policyNames.push("app-script-url");
+  }
+
+  if (scriptViolations.length > 0) {
+    policies.push({
+      name: "app-script-eval",
+      type: "TrustedScript",
+      description: "Guards eval-like sinks — prefer refactoring over allowing",
+      violationCount: scriptViolations.length,
+      code: buildNamedScriptPolicy("app-script-eval", scriptViolations)
+    });
+    policyNames.push("app-script-eval");
+  }
+
+  const cspDirective = generateCspDirective(policyNames);
+
+  return {
+    policies,
+    policyNames,
+    cspDirective,
+    totalPolicies: policies.length,
+    centralizationModule: buildCentralizedModule(policies)
+  };
+}
+
+function buildNamedHtmlPolicy(name, violations, isRich) {
+  const analysis = analyzeHtmlSamples(violations.map(v => v.sample || "").filter(s => s !== "unknown"));
+  const l = [];
+  l.push(`const ${camelCase(name)} = trustedTypes.createPolicy('${name}', {`);
+  l.push("  createHTML: (input) => {");
+  if (isRich && analysis.tags.length > 0) {
+    l.push("    return DOMPurify.sanitize(input, {");
+    l.push("      ADD_TAGS: [" + analysis.tags.filter(t => !["script","object","embed","applet"].includes(t)).map(t => `'${t}'`).join(", ") + "],");
+    if (analysis.attrs.length > 0) {
+      l.push("      ADD_ATTR: [" + analysis.attrs.filter(a => !a.startsWith("on")).map(a => `'${a}'`).join(", ") + "],");
+    }
+    l.push("    });");
+  } else {
+    l.push("    return DOMPurify.sanitize(input);");
+  }
+  l.push("  }");
+  l.push("});");
+  return l.join("\n");
+}
+
+function buildNamedUrlPolicy(name, origins) {
+  const l = [];
+  l.push(`const allowedOrigins = [`);
+  l.push(`  location.origin,`);
+  origins.forEach(o => l.push(`  '${o}',`));
+  l.push(`];\n`);
+  l.push(`const ${camelCase(name)} = trustedTypes.createPolicy('${name}', {`);
+  l.push("  createScriptURL: (input) => {");
+  l.push("    const url = new URL(input, location.href);");
+  l.push("    if (allowedOrigins.includes(url.origin)) return url.href;");
+  l.push("    throw new TypeError('Blocked script URL: ' + input);");
+  l.push("  }");
+  l.push("});");
+  return l.join("\n");
+}
+
+function buildNamedScriptPolicy(name, violations) {
+  const l = [];
+  l.push(`const ${camelCase(name)} = trustedTypes.createPolicy('${name}', {`);
+  l.push("  createScript: (input) => {");
+  l.push("    // WARNING: Prefer refactoring eval/new Function to avoid this policy entirely");
+  l.push("    // If unavoidable, validate against a strict allowlist:");
+  l.push("    // const allowed = ['expression1', 'expression2'];");
+  l.push("    // if (allowed.includes(input)) return input;");
+  l.push("    throw new TypeError('Blocked script evaluation: ' + input.slice(0, 50));");
+  l.push("  }");
+  l.push("});");
+  return l.join("\n");
+}
+
+function camelCase(str) {
+  return str.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+function buildCentralizedModule(policies) {
+  if (policies.length === 0) return "";
+  const l = [];
+  l.push("// ══════════════════════════════════════════════════════════════════");
+  l.push("// Centralized Trusted Types Policies");
+  l.push("// Import this module wherever DOM sinks are used.");
+  l.push("// Do NOT create policies anywhere else in the codebase.");
+  l.push("// ══════════════════════════════════════════════════════════════════\n");
+  l.push("import DOMPurify from 'dompurify';\n");
+  l.push("const policies = {};\n");
+  l.push("if (window.trustedTypes?.createPolicy) {");
+  for (const p of policies) {
+    l.push("");
+    l.push(`  // ${p.description} (${p.violationCount} violation${p.violationCount !== 1 ? "s" : ""} observed)`);
+    const indented = p.code.split("\n").map(line => "  " + line).join("\n");
+    l.push(indented);
+    l.push(`  policies['${p.name}'] = ${camelCase(p.name)};`);
+  }
+  l.push("\n}");
+  l.push("\nexport default policies;");
+  return l.join("\n");
+}
+
+// ── CSP Header Generator ──
+
+function generateCspDirective(policyNames) {
+  if (!policyNames || policyNames.length === 0) {
+    return {
+      enforcing: "Content-Security-Policy: require-trusted-types-for 'script';",
+      reportOnly: "Content-Security-Policy-Report-Only: require-trusted-types-for 'script';",
+      policyNames: [],
+      explanation: "No named policies detected. This CSP enforces Trusted Types but allows any policy name."
+    };
+  }
+
+  const names = policyNames.join(" ");
+  return {
+    enforcing: `Content-Security-Policy: require-trusted-types-for 'script'; trusted-types ${names};`,
+    reportOnly: `Content-Security-Policy-Report-Only: require-trusted-types-for 'script'; trusted-types ${names};`,
+    withDefault: `Content-Security-Policy: require-trusted-types-for 'script'; trusted-types ${names} default;`,
+    policyNames,
+    explanation: `Allows only the named policies [${names}]. ` +
+      `Any trustedTypes.createPolicy() call with a different name will throw. ` +
+      `Use the report-only header first to verify no policies are missed.`,
+    metaTag: `<meta http-equiv="Content-Security-Policy" content="require-trusted-types-for 'script'; trusted-types ${names};">`,
+    nginxConfig: `add_header Content-Security-Policy "require-trusted-types-for 'script'; trusted-types ${names};" always;`,
+    apacheConfig: `Header always set Content-Security-Policy "require-trusted-types-for 'script'; trusted-types ${names};"`
+  };
+}
+
+function generateFullCspHeader(violations) {
+  const rec = recommendNamedPolicies(violations);
+  return rec.cspDirective;
+}
+
+// ── Sink-to-Source Mapping ──
+
+function extractSinkInfo(violation) {
+  const sample = violation.sample || "";
+  const pipeIdx = sample.indexOf("|");
+  const sinkPart = (pipeIdx >= 0 ? sample.substring(0, pipeIdx) : "").trim();
+  const sinkValue = pipeIdx >= 0 ? sample.substring(pipeIdx + 1) : "";
+
+  const SINK_MAP = {
+    "innerhtml":             { sink: "Element.innerHTML",         api: "innerHTML",           category: "html" },
+    "outerhtml":             { sink: "Element.outerHTML",         api: "outerHTML",           category: "html" },
+    "insertadjacenthtml":    { sink: "Element.insertAdjacentHTML", api: "insertAdjacentHTML", category: "html" },
+    "document.write":        { sink: "document.write",            api: "document.write",      category: "html" },
+    "domparser":             { sink: "DOMParser.parseFromString", api: "DOMParser",           category: "html" },
+    "createcontextualfragment": { sink: "Range.createContextualFragment", api: "createContextualFragment", category: "html" },
+    "srcdoc":                { sink: "HTMLIFrameElement.srcdoc",  api: "srcdoc",              category: "html" },
+    "eval":                  { sink: "eval()",                    api: "eval",                category: "script" },
+    "function":              { sink: "new Function()",            api: "Function constructor", category: "script" },
+    "settimeout":            { sink: "setTimeout(string)",        api: "setTimeout",          category: "script" },
+    "setinterval":           { sink: "setInterval(string)",       api: "setInterval",         category: "script" },
+    "htmlscriptelement src": { sink: "HTMLScriptElement.src",     api: "script.src",          category: "url" },
+    "worker constructor":    { sink: "Worker()",                  api: "Worker constructor",  category: "url" },
+    "import(":               { sink: "import()",                  api: "dynamic import",      category: "url" },
+    "importscripts":         { sink: "importScripts()",           api: "importScripts",       category: "url" },
+  };
+
+  const sinkLower = sinkPart.toLowerCase();
+  let matched = null;
+  for (const [pattern, info] of Object.entries(SINK_MAP)) {
+    if (sinkLower.includes(pattern)) { matched = info; break; }
+  }
+
+  if (!matched) {
+    const sampleLower = sample.toLowerCase();
+    for (const [pattern, info] of Object.entries(SINK_MAP)) {
+      if (sampleLower.includes(pattern)) { matched = info; break; }
+    }
+  }
+
+  const sourceLocation = buildSourceLocation(violation);
+
+  return {
+    sinkName: matched ? matched.sink : (sinkPart || "Unknown sink"),
+    sinkApi: matched ? matched.api : "unknown",
+    sinkCategory: matched ? matched.category : inferSinkCategory(violation),
+    sinkValue: sinkValue.substring(0, 200),
+    sourceLocation,
+    sourceFile: violation.sourceFile || "unknown",
+    lineNumber: violation.lineNumber || "unknown",
+    columnNumber: violation.columnNumber || "unknown"
+  };
+}
+
+function buildSourceLocation(violation) {
+  const file = violation.sourceFile || "unknown";
+  const line = violation.lineNumber || "unknown";
+  const col = violation.columnNumber || "unknown";
+  if (file === "unknown") return null;
+  let loc = file;
+  if (line !== "unknown") {
+    loc += `:${line}`;
+    if (col !== "unknown") loc += `:${col}`;
+  }
+  return loc;
+}
+
+function inferSinkCategory(violation) {
+  const type = violation.violationType || inferViolationType(violation);
+  switch (type) {
+    case "TrustedHTML": return "html";
+    case "TrustedScript": return "script";
+    case "TrustedScriptURL": return "url";
+    default: return "unknown";
+  }
+}
+
+// ── Third-Party vs First-Party Classification ──
+
+function isFirstPartyAlias(sourceHost) {
+  return firstPartyAliases.some(alias =>
+    sourceHost === alias || sourceHost.endsWith("." + alias)
+  );
+}
+
+function classifyOrigin(violation) {
+  const pageUrl = violation.url || "";
+  const sourceFile = violation.sourceFile || "";
+
+  if (!sourceFile || sourceFile === "unknown" || !pageUrl) {
+    return { party: "unknown", pageOrigin: "", sourceOrigin: "" };
+  }
+
+  try {
+    const pageOrigin = new URL(pageUrl).origin;
+    const sourceOrigin = new URL(sourceFile).origin;
+    const sourceHost = new URL(sourceFile).hostname;
+
+    if (pageOrigin === sourceOrigin) {
+      return { party: "first-party", pageOrigin, sourceOrigin };
+    }
+
+    if (isFirstPartyAlias(sourceHost)) {
+      return { party: "first-party", pageOrigin, sourceOrigin };
+    }
+
+    return { party: "third-party", pageOrigin, sourceOrigin };
+  } catch {
+    if (sourceFile.startsWith("inline") || sourceFile.startsWith("eval")) {
+      return { party: "first-party", pageOrigin: "", sourceOrigin: "inline" };
+    }
+    return { party: "unknown", pageOrigin: "", sourceOrigin: "" };
+  }
+}
+
+function classifyAllViolations(violations) {
+  const firstParty = [];
+  const thirdParty = [];
+  const unknown = [];
+  const thirdPartyOrigins = new Map();
+
+  for (const v of violations) {
+    const cls = classifyOrigin(v);
+    switch (cls.party) {
+      case "first-party": firstParty.push(v); break;
+      case "third-party":
+        thirdParty.push(v);
+        thirdPartyOrigins.set(cls.sourceOrigin,
+          (thirdPartyOrigins.get(cls.sourceOrigin) || 0) + 1);
+        break;
+      default: unknown.push(v); break;
+    }
+  }
+
+  return {
+    firstParty: { count: firstParty.length, violations: firstParty },
+    thirdParty: {
+      count: thirdParty.length,
+      violations: thirdParty,
+      origins: Object.fromEntries(thirdPartyOrigins)
+    },
+    unknown: { count: unknown.length, violations: unknown },
+    summary: {
+      total: violations.length,
+      firstPartyPct: violations.length ? Math.round((firstParty.length / violations.length) * 100) : 0,
+      thirdPartyPct: violations.length ? Math.round((thirdParty.length / violations.length) * 100) : 0
+    }
+  };
+}
+
+function reclassifyParty(violations) {
+  for (const v of violations) {
+    const cls = classifyOrigin(v);
+    v.party = cls.party;
+    v.sourceOrigin = cls.sourceOrigin;
+  }
+}
+
+// ── Auto-Suggest First-Party Aliases ──
+
+function suggestAliases(violations) {
+  const pageHosts = new Set();
+  const sourceHostCounts = new Map();
+
+  for (const v of violations) {
+    try { pageHosts.add(new URL(v.url).hostname); } catch {}
+    try {
+      const host = new URL(v.sourceFile).hostname;
+      if (host) sourceHostCounts.set(host, (sourceHostCounts.get(host) || 0) + 1);
+    } catch {}
+  }
+
+  const pageOrigins = new Set();
+  for (const v of violations) {
+    try { pageOrigins.add(new URL(v.url).origin); } catch {}
+  }
+
+  const suggestions = [];
+  const alreadyAlias = new Set(firstPartyAliases);
+
+  for (const [host, count] of sourceHostCounts) {
+    if (count < 2) continue;
+
+    let matchesPage = false;
+    for (const ph of pageHosts) {
+      if (host === ph) { matchesPage = true; break; }
+    }
+    if (matchesPage) continue;
+    if (alreadyAlias.has(host)) continue;
+
+    const hostOrigin = [...sourceHostCounts.keys()]
+      .filter(h => h === host)
+      .map(h => { try { return new URL([...violations].find(v => { try { return new URL(v.sourceFile).hostname === h; } catch { return false; } })?.sourceFile).origin; } catch { return null; } })
+      .filter(Boolean)[0];
+
+    if (hostOrigin && pageOrigins.has(hostOrigin)) continue;
+
+    const isCdnLike = /^(cdn|static|assets|media|img|js|css|scripts|resources)\b/i.test(host) ||
+      /\b(cdn|static|assets|objects|cloud|storage)\b/i.test(host);
+
+    const sharesTld = [...pageHosts].some(ph => {
+      const pageParts = ph.split(".");
+      const srcParts = host.split(".");
+      if (pageParts.length >= 2 && srcParts.length >= 2) {
+        return pageParts.slice(-2).join(".") === srcParts.slice(-2).join(".") ||
+               pageParts.slice(-1)[0] === srcParts.slice(-1)[0];
+      }
+      return false;
+    });
+
+    let reason = "";
+    if (isCdnLike && sharesTld) reason = "CDN pattern with shared domain";
+    else if (isCdnLike) reason = "CDN-like hostname";
+    else if (sharesTld) reason = "Shares top-level domain with page";
+    else if (count >= 5) reason = "High-frequency source (possible CDN)";
+
+    if (reason) {
+      suggestions.push({ host, count, reason });
+    }
+  }
+
+  suggestions.sort((a, b) => b.count - a.count);
+  return suggestions.slice(0, 10);
+}
+
+// ── Framework Detection ──
+
+function detectFrameworks(violations) {
+  const detected = [];
+  const allSources = new Set();
+  const allSamples = [];
+
+  for (const v of violations) {
+    if (v.sourceFile && v.sourceFile !== "unknown") allSources.add(v.sourceFile.toLowerCase());
+    if (v.stackTrace) allSamples.push(v.stackTrace.toLowerCase());
+    if (v.sample) allSamples.push(v.sample.toLowerCase());
+  }
+
+  const combined = [...allSources].join(" ") + " " + allSamples.join(" ");
+
+  const FRAMEWORK_SIGNALS = [
+    { name: "React",   patterns: ["react-dom", "react.production", "react.development", "jsx-runtime", "__react", "reactdom", "_reactroot"], version: null },
+    { name: "Angular", patterns: ["angular", "@angular/core", "zone.js", "ng-", "angular.min.js", "ngsanitize", "platformbrowser"], version: null },
+    { name: "Vue",     patterns: ["vue.runtime", "vue.global", "vue.esm", "vue@", "vue.min.js", "__vue_", "vuejs"], version: null },
+    { name: "jQuery",  patterns: ["jquery.min.js", "jquery-", "jquery.js", "jquery.slim"], version: null },
+    { name: "Svelte",  patterns: ["svelte", "__svelte"], version: null },
+    { name: "Next.js", patterns: ["_next/static", "next/dist", "__next"], version: null },
+    { name: "Nuxt",    patterns: ["_nuxt/", "nuxt.js", "__nuxt"], version: null },
+    { name: "Webpack", patterns: ["webpack", "__webpack_require__", "webpackjsonp"], version: null },
+  ];
+
+  for (const fw of FRAMEWORK_SIGNALS) {
+    if (fw.patterns.some(p => combined.includes(p))) {
+      detected.push({ name: fw.name, confidence: "high" });
+    }
+  }
+
+  return detected;
+}
+
+function getFrameworkGuidance(frameworks) {
+  const guidance = {};
+
+  const FW_GUIDANCE = {
+    "React": {
+      tip: "React escapes HTML by default via JSX. Violations likely come from dangerouslySetInnerHTML or third-party libraries.",
+      fixSteps: [
+        "Replace dangerouslySetInnerHTML with sanitized content: use DOMPurify.sanitize() inside a Trusted Types policy",
+        "For React 19+: use the built-in Sanitizer API integration if available",
+        "Wrap policy creation in a single module (e.g., src/utils/trusted-types.ts) and import across components",
+        "Use react-helmet or next/head for safe <script> injection"
+      ],
+      policyPattern: "// React: centralize in src/utils/tt-policy.ts\nimport DOMPurify from 'dompurify';\nexport const htmlPolicy = trustedTypes.createPolicy('react-html', {\n  createHTML: (input) => DOMPurify.sanitize(input)\n});\n// Usage: <div dangerouslySetInnerHTML={{__html: htmlPolicy.createHTML(content)}} />"
+    },
+    "Angular": {
+      tip: "Angular has built-in Trusted Types support since v15. Use its DomSanitizer with bypassSecurityTrust* methods wrapped in a TT policy.",
+      fixSteps: [
+        "Enable Trusted Types in angular.json: set 'security.trustedTypes' configuration",
+        "Use Angular's DomSanitizer.bypassSecurityTrustHtml() within a TT policy wrapper",
+        "Register a custom TrustedTypesPolicy in your app.module.ts or main.ts",
+        "Angular v16+ automatically creates TT policies for its template engine"
+      ],
+      policyPattern: "// Angular: register in main.ts or app.module.ts\nif (window.trustedTypes) {\n  trustedTypes.createPolicy('angular', {\n    createHTML: (s) => s,  // Angular DomSanitizer handles this\n    createScriptURL: (s) => s,\n    createScript: (s) => s,\n  });\n}"
+    },
+    "Vue": {
+      tip: "Vue's v-html directive bypasses Trusted Types. Use a custom directive with sanitization instead.",
+      fixSteps: [
+        "Replace v-html with a custom v-safe-html directive that uses DOMPurify",
+        "Create a Vue plugin that registers a Trusted Types policy globally",
+        "Use setHTML() in custom directives for modern browsers",
+        "For Nuxt: add the Trusted Types CSP header in nuxt.config.ts"
+      ],
+      policyPattern: "// Vue: plugin in src/plugins/trusted-types.ts\nimport DOMPurify from 'dompurify';\nconst policy = trustedTypes.createPolicy('vue-html', {\n  createHTML: (input) => DOMPurify.sanitize(input)\n});\nexport default {\n  install(app) {\n    app.directive('safe-html', (el, binding) => {\n      el.innerHTML = policy.createHTML(binding.value);\n    });\n  }\n};"
+    },
+    "jQuery": {
+      tip: "jQuery's .html(), .append(), .prepend(), .after(), .before() all use innerHTML internally and trigger TT violations.",
+      fixSteps: [
+        "Replace $.html(content) with element.setHTML(content) where possible",
+        "Create a default TT policy that wraps DOMPurify for jQuery's innerHTML calls",
+        "Consider migrating from jQuery to modern DOM APIs",
+        "Wrap jQuery in a TT-aware helper: $.safeHtml(selector, content)"
+      ],
+      policyPattern: "// jQuery: default policy (catches all jQuery innerHTML calls)\ntrustedTypes.createPolicy('default', {\n  createHTML: (input) => DOMPurify.sanitize(input),\n  createScriptURL: (input) => {\n    const url = new URL(input, location.href);\n    if (url.origin === location.origin) return input;\n    throw new TypeError('Blocked: ' + input);\n  }\n});"
+    }
+  };
+
+  for (const fw of frameworks) {
+    if (FW_GUIDANCE[fw.name]) {
+      guidance[fw.name] = FW_GUIDANCE[fw.name];
+    }
+  }
+
+  return guidance;
+}
+
+// ── Policy Scatter Detection & Centralization ──
+
+function analyzeScatter(violations) {
+  const sourceFiles = new Set();
+  const sourceOrigins = new Set();
+  const sinksBySource = new Map();
+
+  for (const v of violations) {
+    const src = v.sourceFile || "unknown";
+    if (src !== "unknown") {
+      sourceFiles.add(src);
+      try {
+        const host = new URL(src).hostname;
+        if (!isFirstPartyAlias(host)) {
+          sourceOrigins.add(new URL(src).origin);
+        }
+      } catch {}
+
+      const sinks = sinksBySource.get(src) || new Set();
+      const sinkInfo = extractSinkInfo(v);
+      sinks.add(sinkInfo.sinkName);
+      sinksBySource.set(src, sinks);
+    }
+  }
+
+  const scattered = sourceFiles.size >= 5;
+  const multiOrigin = sourceOrigins.size > 1;
+
+  const recommendation = {
+    isScattered: scattered,
+    isMultiOrigin: multiOrigin,
+    sourceFileCount: sourceFiles.size,
+    sourceOriginCount: sourceOrigins.size,
+    severity: scattered ? (sourceFiles.size >= 10 ? "high" : "medium") : "low",
+    message: "",
+    steps: [],
+    modulePattern: ""
+  };
+
+  if (scattered) {
+    recommendation.message = `Violations originate from ${sourceFiles.size} different source files. ` +
+      `Sink usage is spread across the codebase, making security audits difficult.`;
+    recommendation.steps = [
+      "Create a single shared policy module (e.g., src/lib/tt-policies.ts)",
+      "Export named policies for each trust domain (html, scriptUrl, script)",
+      "Import the shared module wherever DOM sinks are used — never call trustedTypes.createPolicy() outside this module",
+      "Add a CSP trusted-types directive listing only your centralized policy names",
+      "Use eslint-plugin-trusted-types or code review to enforce the single-module rule"
+    ];
+    recommendation.modulePattern =
+`// src/lib/tt-policies.ts — Single source of truth for all TT policies
+import DOMPurify from 'dompurify';
+
+const policies = {};
+
+if (window.trustedTypes?.createPolicy) {
+  policies.html = trustedTypes.createPolicy('app-html', {
+    createHTML: (input) => DOMPurify.sanitize(input)
+  });
+
+  policies.scriptUrl = trustedTypes.createPolicy('app-script-url', {
+    createScriptURL: (input) => {
+      const url = new URL(input, location.href);
+      const allowed = [location.origin /* add CDN origins */];
+      if (allowed.includes(url.origin)) return url.href;
+      throw new TypeError('Blocked script URL: ' + input);
+    }
+  });
+}
+
+export default policies;`;
+  } else {
+    recommendation.message = sourceFiles.size > 0
+      ? `Violations come from ${sourceFiles.size} source file(s) — manageable scope.`
+      : "No source file information available in violations.";
+  }
+
+  const sourceSummary = [];
+  for (const [file, sinks] of sinksBySource.entries()) {
+    sourceSummary.push({
+      file,
+      sinks: [...sinks],
+      violationCount: violations.filter(v => v.sourceFile === file).length
+    });
+  }
+  sourceSummary.sort((a, b) => b.violationCount - a.violationCount);
+
+  return { ...recommendation, sourceSummary };
+}
+
 // ── Fix Guidance ──
 
 function getFixGuidance(violation) {
   const type = violation.violationType || inferViolationType(violation);
   const sample = violation.sample || "";
   const g = { violationType: type, severity: "high", title: "", explanation: "", fixSteps: [], codeExample: "", references: [], sinkType: "", dangerLevel: "" };
+
+  const sinkInfo = extractSinkInfo(violation);
+  g.sinkMapping = sinkInfo;
+
   switch (type) {
     case "TrustedHTML": return buildHtmlGuidance(g, sample, violation);
     case "TrustedScript": return buildScriptGuidance(g, sample, violation);
@@ -680,11 +1303,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       chrome.storage.local.get(["violations", "aiApiKeys"], (result) => {
         const allViolations = result.violations || [];
         const tabViolations = getTabViolations(allViolations, reqTab);
+        reclassifyParty(tabViolations);
         sendResponse({
           violations: tabViolations,
           clusters: clusterViolations(tabViolations),
           apiKeys: result.aiApiKeys || {},
-          enabled: monitoringEnabled
+          enabled: monitoringEnabled,
+          originAnalysis: classifyAllViolations(tabViolations),
+          frameworks: detectFrameworks(tabViolations),
+          scatter: analyzeScatter(tabViolations),
+          firstPartyAliases: firstPartyAliases
         });
       });
       return true;
@@ -693,7 +1321,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     case "getViolations": {
       const reqTab = request.tabId || -1;
       chrome.storage.local.get(["violations"], (result) => {
-        sendResponse({ violations: getTabViolations(result.violations || [], reqTab) });
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        reclassifyParty(tabViolations);
+        sendResponse({ violations: tabViolations });
       });
       return true;
     }
@@ -707,9 +1337,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return true;
     }
 
-    case "getFixGuidance":
-      sendResponse({ guidance: getFixGuidance(request.violation) });
+    case "getFixGuidance": {
+      const guidance = getFixGuidance(request.violation);
+      const frameworks = detectFrameworks(request.violations || [request.violation]);
+      if (frameworks.length > 0) {
+        guidance.frameworkGuidance = getFrameworkGuidance(frameworks);
+        guidance.detectedFrameworks = frameworks;
+      }
+      sendResponse({ guidance });
       return true;
+    }
 
     case "generatePolicy": {
       const reqTab = request.tabId || -1;
@@ -720,6 +1357,69 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           ? generatePerfectTypesPolicy(tabViolations)
           : generatePolicy(tabViolations);
         sendResponse({ policy });
+      });
+      return true;
+    }
+
+    case "getNamedPolicies": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        sendResponse({ result: recommendNamedPolicies(tabViolations) });
+      });
+      return true;
+    }
+
+    case "getCspHeader": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        sendResponse({ csp: generateFullCspHeader(tabViolations) });
+      });
+      return true;
+    }
+
+    case "getOriginAnalysis": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        sendResponse({ analysis: classifyAllViolations(tabViolations) });
+      });
+      return true;
+    }
+
+    case "getScatterAnalysis": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        sendResponse({ scatter: analyzeScatter(tabViolations) });
+      });
+      return true;
+    }
+
+    case "getFrameworkInfo": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        const frameworks = detectFrameworks(tabViolations);
+        sendResponse({
+          frameworks,
+          guidance: getFrameworkGuidance(frameworks)
+        });
+      });
+      return true;
+    }
+
+    case "getSinkMap": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        const sinkMap = tabViolations.map(v => ({
+          violation: v,
+          sink: extractSinkInfo(v),
+          origin: classifyOrigin(v)
+        }));
+        sendResponse({ sinkMap });
       });
       return true;
     }
@@ -771,6 +1471,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     case "getEnabled":
       sendResponse({ enabled: monitoringEnabled });
       return true;
+
+    case "getFirstPartyAliases":
+      sendResponse({ aliases: firstPartyAliases });
+      return true;
+
+    case "saveFirstPartyAliases":
+      firstPartyAliases = (request.aliases || []).map(a => a.trim().toLowerCase()).filter(Boolean);
+      chrome.storage.local.set({ firstPartyAliases });
+      sendResponse({ success: true });
+      return true;
+
+    case "suggestAliases": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        sendResponse({ suggestions: suggestAliases(tabViolations) });
+      });
+      return true;
+    }
   }
 });
 
@@ -837,8 +1556,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ── Init ──
 
-chrome.storage.local.get(["monitoringEnabled"], (result) => {
+chrome.storage.local.get(["monitoringEnabled", "firstPartyAliases"], (result) => {
   if (result.monitoringEnabled !== undefined) monitoringEnabled = result.monitoringEnabled;
+  if (Array.isArray(result.firstPartyAliases)) firstPartyAliases = result.firstPartyAliases;
+  aliasesReady = true;
+  for (const item of pendingViolationQueue) {
+    processViolation(item.violation, item.tabId);
+  }
+  pendingViolationQueue = [];
 });
 
 setInterval(storeViolations, 15000);
