@@ -1,0 +1,23 @@
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows / misc
+Thumbs.db
+Desktop.ini
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# Secrets (never commit)
+.env
+.env.*
+
+# Local build artifacts
+*.crx
+*.pem
+*.zip
+
+# Generated / local-only project output
+_metadata/
