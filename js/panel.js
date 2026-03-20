@@ -5,13 +5,45 @@ const $$ = s => document.querySelectorAll(s);
 const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
 const TAB_ID = chrome.devtools.inspectedWindow.tabId;
+const MAX_PANEL_VIOLATIONS = 1000;
+const MAX_RENDERED_ROWS = 200;
 let violations = [];
 let clusters = [];
 let currentDetail = null;
+let originAnalysis = null;
+let frameworksDetected = [];
+let frameworkGuidance = {};
+let scatterAnalysis = null;
+let namedPoliciesResult = null;
+let cspResult = null;
+let firstPartyAliases = [];
 let currentSort = { field: "timestamp", ascending: false };
 let searchTerm = "";
 let aiKey = "", aiProv = "auto";
 let aiHistory = [];
+let insightsDebounce = null;
+let clearPending = false;
+
+// ── Extension context guards ──
+
+function contextAlive() { return !!chrome.runtime?.id; }
+
+function safeSend(msg, cb) {
+  if (!contextAlive()) { stopPolling(); return; }
+  try {
+    chrome.runtime.sendMessage(msg, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn("safeSend:", chrome.runtime.lastError.message);
+        if (cb) cb(undefined);
+        return;
+      }
+      if (cb) cb(response);
+    });
+  } catch (e) {
+    console.warn("safeSend:", e.message);
+    if (cb) cb(undefined);
+  }
+}
 
 // ── Resilient port to background (auto-reconnect on SW termination) ──
 
@@ -20,6 +52,7 @@ let pollTimer = null;
 let lastKnownUrl = "";
 
 function connectPort() {
+  if (!contextAlive()) { stopPolling(); return; }
   try {
     port = chrome.runtime.connect({ name: "tt-panel" });
   } catch {
@@ -30,6 +63,8 @@ function connectPort() {
   port.postMessage({ action: "setTabId", tabId: TAB_ID });
 
   port.onMessage.addListener(msg => {
+    if (!contextAlive()) return;
+
     if (msg.action === "navigationReset") {
       resetPanelState();
       return;
@@ -37,27 +72,35 @@ function connectPort() {
 
     if (msg.action === "newViolation") {
       if (msg.violation.tabId !== TAB_ID) return;
+      if (clearPending) return;
 
       violations.push(msg.violation);
+      if (violations.length > MAX_PANEL_VIOLATIONS) {
+        violations = violations.slice(-MAX_PANEL_VIOLATIONS);
+      }
       renderLiveTable();
       updateStats();
-      chrome.runtime.sendMessage({ action: "getClusters", tabId: TAB_ID }, r => {
+      safeSend({ action: "getClusters", tabId: TAB_ID }, r => {
         if (!r) return;
         clusters = r.clusters || [];
         if ($("#pt-clusters").classList.contains("active")) renderClusters();
       });
+      if ($("#pt-insights").classList.contains("active")) {
+        scheduleInsightsRefresh();
+      }
     }
   });
 
   port.onDisconnect.addListener(() => {
     port = null;
-    scheduleReconnect();
+    if (contextAlive()) scheduleReconnect();
   });
 
   stopPolling();
 }
 
 function scheduleReconnect() {
+  if (!contextAlive()) { stopPolling(); return; }
   setTimeout(() => {
     connectPort();
     checkForPageChange();
@@ -66,7 +109,9 @@ function scheduleReconnect() {
 }
 
 function checkForPageChange() {
+  if (!contextAlive()) { stopPolling(); return; }
   chrome.devtools.inspectedWindow.eval("location.href", (url) => {
+    if (!contextAlive()) { stopPolling(); return; }
     if (!url) return;
     const changed = hasUrlChanged(lastKnownUrl, url);
     lastKnownUrl = url;
@@ -75,14 +120,14 @@ function checkForPageChange() {
       resetPanelState();
     }
 
-    // Always reload current state from storage
-    chrome.runtime.sendMessage({ action: "getFullState", tabId: TAB_ID }, r => {
+    safeSend({ action: "getFullState", tabId: TAB_ID }, r => {
       if (!r) return;
       violations = r.violations || [];
       clusters = r.clusters || [];
       renderLiveTable();
       renderClusters();
       updateStats();
+      if ($("#pt-insights").classList.contains("active")) loadInsights();
     });
   });
 }
@@ -109,6 +154,7 @@ connectPort();
 
 // Catch up immediately when the panel regains focus
 document.addEventListener("visibilitychange", () => {
+  if (!contextAlive()) { stopPolling(); return; }
   if (document.visibilityState === "visible") {
     if (!port) connectPort();
     checkForPageChange();
@@ -121,6 +167,14 @@ function resetPanelState() {
   currentDetail = null;
   aiHistory = [];
   searchTerm = "";
+  originAnalysis = null;
+  frameworksDetected = [];
+  frameworkGuidance = {};
+  scatterAnalysis = null;
+  namedPoliciesResult = null;
+  cspResult = null;
+  cancelInsightsRefresh();
+  // firstPartyAliases intentionally NOT reset — they are user config, not per-page state
 
   const searchBox = $("#search-input");
   if (searchBox) searchBox.value = "";
@@ -128,6 +182,15 @@ function resetPanelState() {
   renderLiveTable();
   renderClusters();
   updateStats();
+
+  if ($("#pt-insights").classList.contains("active")) {
+    renderOriginAnalysis();
+    renderSinkMap([]);
+    renderFrameworkInfo([], {});
+    renderScatterAnalysis(null);
+    renderNamedPolicies(null);
+    renderCspHeader(null);
+  }
 
   closeSidebar();
 
@@ -155,19 +218,24 @@ document.addEventListener("DOMContentLoaded", () => {
   bindPolicy();
   bindAI();
   bindSidebar();
+  bindAliases();
   loadState();
 });
 
 function loadState() {
-  // Seed the URL tracker so we can detect page changes after SW restart
+  if (!contextAlive()) return;
   chrome.devtools.inspectedWindow.eval("location.href", (url) => {
     if (url) lastKnownUrl = url;
   });
 
-  chrome.runtime.sendMessage({ action: "getFullState", tabId: TAB_ID }, r => {
+  safeSend({ action: "getFullState", tabId: TAB_ID }, r => {
     if (!r) return;
     violations = r.violations || [];
     clusters = r.clusters || [];
+    originAnalysis = r.originAnalysis || null;
+    frameworksDetected = r.frameworks || [];
+    scatterAnalysis = r.scatter || null;
+    firstPartyAliases = r.firstPartyAliases || [];
     aiKey = (r.apiKeys || {}).key || "";
     aiProv = (r.apiKeys || {}).provider || "auto";
     const enabled = r.enabled !== false;
@@ -176,6 +244,8 @@ function loadState() {
     renderLiveTable();
     renderClusters();
     updateStats();
+    renderAliasTags();
+    if ($("#pt-insights").classList.contains("active")) loadInsights();
   });
 }
 
@@ -189,12 +259,16 @@ function bindTabs() {
     $(`#pt-${t.dataset.tab}`).classList.add("active");
 
     if (t.dataset.tab === "clusters") {
-      chrome.runtime.sendMessage({ action: "getClusters", tabId: TAB_ID }, r => {
+      safeSend({ action: "getClusters", tabId: TAB_ID }, r => {
         if (!r) return;
         clusters = r.clusters || [];
         renderClusters();
         updateStats();
       });
+    }
+
+    if (t.dataset.tab === "insights") {
+      loadInsights();
     }
   }));
 }
@@ -203,7 +277,7 @@ function bindTabs() {
 
 function bindHeader() {
   $("#monitoring-toggle").addEventListener("change", e => {
-    chrome.runtime.sendMessage({ action: "setEnabled", enabled: e.target.checked });
+    safeSend({ action: "setEnabled", enabled: e.target.checked });
   });
   $("#search-input").addEventListener("input", e => {
     searchTerm = e.target.value.toLowerCase();
@@ -212,8 +286,10 @@ function bindHeader() {
   $("#btn-export").addEventListener("click", exportData);
   $("#btn-clear").addEventListener("click", () => {
     if (!confirm("Clear violations for this tab?")) return;
-    chrome.runtime.sendMessage({ action: "clearViolations", tabId: TAB_ID }, () => {
+    clearPending = true;
+    safeSend({ action: "clearViolations", tabId: TAB_ID }, () => {
       resetPanelState();
+      clearPending = false;
     });
   });
 }
@@ -254,7 +330,7 @@ function renderLiveTable() {
   tbody.innerHTML = "";
   const list = filtered();
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="t-empty">No violations on this tab. Browse pages to capture Trusted Types issues.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="t-empty">No violations on this tab. Browse pages to capture Trusted Types issues.</td></tr>';
     return;
   }
   const sorted = [...list].sort((a, b) => {
@@ -262,7 +338,13 @@ function renderLiveTable() {
     let c = fa < fb ? -1 : fa > fb ? 1 : 0;
     return currentSort.ascending ? c : -c;
   });
-  sorted.forEach((v, i) => renderLiveRow(v, i, tbody));
+  const display = sorted.slice(0, MAX_RENDERED_ROWS);
+  display.forEach((v, i) => renderLiveRow(v, i, tbody));
+  if (sorted.length > MAX_RENDERED_ROWS) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="7" class="t-empty">Showing ${MAX_RENDERED_ROWS} of ${sorted.length} violations. Use search to narrow results.</td>`;
+    tbody.appendChild(tr);
+  }
 }
 
 function renderLiveRow(v, idx, tbody) {
@@ -273,12 +355,20 @@ function renderLiveRow(v, idx, tbody) {
     ? (v.sourceFile || "").split("/").pop() + ":" + v.lineNumber
     : "";
   const sample = esc((v.sample || "").substring(0, 80));
+  const sinkName = esc(v.sinkName || "—");
+  const partyBadge = v.party === "third-party"
+    ? '<span class="badge b-3p">3rd party</span>'
+    : v.party === "first-party"
+    ? '<span class="badge b-1p">1st party</span>'
+    : '<span class="badge b-unknown">—</span>';
 
   tr.innerHTML = `
     <td class="t-time">${esc(time)}</td>
     <td><span class="badge ${bc}">${esc(v.violationType || "?")}</span></td>
+    <td class="t-sink" title="${sinkName}">${sinkName}</td>
     <td class="t-sample" title="${esc(v.sample || "")}">${sample}</td>
     <td class="t-source" title="${esc(v.sourceFile || "")}">${esc(src)}</td>
+    <td class="t-party">${partyBadge}</td>
     <td class="t-acts"><button class="row-btn" data-act="detail">Info</button> <button class="row-btn fix" data-act="fix">Fix</button></td>`;
 
   tr.querySelector('[data-act="detail"]').addEventListener("click", () => showSidebar(v));
@@ -306,13 +396,26 @@ function showSidebar(v) {
   const hasCol = v.columnNumber && v.columnNumber !== "unknown";
   const lineStr = hasLine ? (hasCol ? `${v.lineNumber}:${v.columnNumber}` : String(v.lineNumber)) : null;
 
+  const partyLabel = v.party === "third-party"
+    ? '<span class="badge b-3p">Third-party</span>'
+    : v.party === "first-party"
+    ? '<span class="badge b-1p">First-party</span>'
+    : null;
+
+  const sinkLabel = v.sinkName && v.sinkName !== "Unknown sink"
+    ? `<code>${esc(v.sinkName)}</code>`
+    : null;
+
   const fields = [
     ["Type", `<span class="badge ${badgeClass(v.violationType)}">${esc(v.violationType)}</span>`],
+    ["Sink", sinkLabel],
+    ["Origin", partyLabel],
     ["Directive", esc(v.directive)],
     ["URL", v.url && v.url.startsWith("http") ? `<a href="${esc(v.url)}" target="_blank">${esc(v.url)}</a>` : esc(v.url)],
     ["Source", v.sourceFile && v.sourceFile !== "unknown" ? esc(v.sourceFile) : null],
     ["Line", lineStr],
     ["Blocked", v.blockedUri && v.blockedUri !== "unknown" ? esc(v.blockedUri) : null],
+    ["Src Origin", v.sourceOrigin && v.sourceOrigin !== "" ? esc(v.sourceOrigin) : null],
     ["Time", new Date(v.timestamp).toLocaleString()],
     ["Sample", v.sample && v.sample !== "unknown" ? `<pre class="code-pre">${esc(v.sample)}</pre>` : null],
     ["Stack", v.stackTrace ? `<pre class="code-pre">${esc(v.stackTrace)}</pre>` : null]
@@ -363,22 +466,56 @@ function showFixFor(v) {
   $('[data-tab="fix"]').classList.add("active");
   $("#pt-fix").classList.add("active");
 
-  chrome.runtime.sendMessage({ action: "getFixGuidance", violation: v }, r => {
+  safeSend({ action: "getFixGuidance", violation: v, violations }, r => {
     if (!r) return;
     const g = r.guidance;
     $("#fix-intro").classList.add("hidden");
     $("#fix-detail").classList.remove("hidden");
     const sc = g.severity === "critical" ? "sev-critical" : g.severity === "high" ? "sev-high" : "sev-medium";
     let h = `<div class="fix-hdr"><h2>${esc(g.title)}</h2><span class="sev-badge ${sc}">${esc(g.severity)}</span></div>`;
-    h += `<div class="fix-meta"><strong>Sink:</strong> ${esc(g.sinkType)}<br><strong>Risk:</strong> ${esc(g.dangerLevel)}</div>`;
+    h += `<div class="fix-meta"><strong>Sink:</strong> ${esc(g.sinkType)}<br><strong>Risk:</strong> ${esc(g.dangerLevel)}`;
+    if (g.sinkMapping && g.sinkMapping.sinkName !== "Unknown sink") {
+      h += `<br><strong>DOM Sink:</strong> <code>${esc(g.sinkMapping.sinkName)}</code>`;
+    }
+    if (g.sinkMapping && g.sinkMapping.sourceLocation) {
+      h += `<br><strong>Location:</strong> <code>${esc(g.sinkMapping.sourceLocation)}</code>`;
+    }
+    h += `</div>`;
     if (v.sample && v.sample !== "unknown") h += `<div class="fix-sec"><h3>Sample</h3><pre class="code-pre">${esc(v.sample)}</pre></div>`;
     h += `<div class="fix-sec"><h3>Explanation</h3><p>${esc(g.explanation)}</p></div>`;
     h += `<div class="fix-sec"><h3>Fix Steps</h3><ol>${g.fixSteps.map(s => `<li>${esc(s)}</li>`).join("")}</ol></div>`;
     h += `<div class="fix-sec"><h3>Code Example</h3><div class="code-wrap"><button class="copy-code" id="cc-fix">Copy</button><pre class="code-pre" id="fix-code-block">${esc(g.codeExample)}</pre></div></div>`;
+
+    if (g.detectedFrameworks && g.detectedFrameworks.length > 0 && g.frameworkGuidance) {
+      h += '<div class="fix-sec"><h3>Framework-Specific Guidance</h3>';
+      for (const fw of g.detectedFrameworks) {
+        const fg = g.frameworkGuidance[fw.name];
+        if (!fg) continue;
+        h += `<div class="fw-inline"><strong>${esc(fw.name)} detected</strong>`;
+        h += `<p class="fw-tip">${esc(fg.tip)}</p>`;
+        h += '<ol>';
+        for (const step of fg.fixSteps) {
+          h += `<li>${esc(step)}</li>`;
+        }
+        h += '</ol>';
+        if (fg.policyPattern) {
+          h += `<div class="code-wrap"><button class="copy-code cc-fw">Copy</button><pre class="code-pre">${esc(fg.policyPattern)}</pre></div>`;
+        }
+        h += '</div>';
+      }
+      h += '</div>';
+    }
+
     h += `<div class="fix-sec"><h3>References</h3><ul class="ref-list">${g.references.map(r => `<li><a href="${esc(r.url)}" target="_blank">${esc(r.title)}</a></li>`).join("")}</ul></div>`;
     if (aiKey) h += `<button class="hdr-btn primary" id="fix-ask-ai" style="margin-top:6px">Ask AI for Deeper Analysis</button>`;
     $("#fix-detail-body").innerHTML = h;
     $("#cc-fix")?.addEventListener("click", () => { navigator.clipboard.writeText($("#fix-code-block").textContent); $("#cc-fix").textContent = "Copied!"; setTimeout(() => $("#cc-fix").textContent = "Copy", 1200); });
+    $$(".cc-fw").forEach(btn => btn.addEventListener("click", () => {
+      const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 1200);
+    }));
     $$("#fix-detail-body a").forEach(a => a.addEventListener("click", e => { e.preventDefault(); chrome.tabs.create({ url: a.href }); }));
     $("#fix-ask-ai")?.addEventListener("click", () => askAIAbout(v));
   });
@@ -398,8 +535,8 @@ function bindPolicy() {
 
   $("#btn-gen-policy").addEventListener("click", () => {
     $("#btn-gen-policy").textContent = "Generating...";
-    chrome.runtime.sendMessage({ action: "generatePolicy", tabId: TAB_ID, mode: policyMode }, r => {
-      if (!r) return;
+    safeSend({ action: "generatePolicy", tabId: TAB_ID, mode: policyMode }, r => {
+      if (!r) { $("#btn-gen-policy").textContent = "Generate"; return; }
       $("#policy-output").textContent = r.policy;
       renderPolicyWarnings();
       $("#btn-gen-policy").textContent = "Regenerate";
@@ -482,7 +619,7 @@ function saveAIKey() {
   const k = $("#ai-key").value.trim(), p = $("#ai-provider").value;
   if (!k) { showAISt("Enter an API key.", "err"); return; }
   aiKey = k; aiProv = p;
-  chrome.runtime.sendMessage({ action: "saveApiKeys", apiKeys: { key: k, provider: p } }, () => {
+  safeSend({ action: "saveApiKeys", apiKeys: { key: k, provider: p } }, () => {
     showAISt("Saved!", "ok");
     setTimeout(showAIChat, 600);
   });
@@ -502,6 +639,18 @@ function showAISt(msg, type) {
   el.classList.remove("hidden");
 }
 
+function gatherAIAnalysis() {
+  return {
+    originAnalysis: originAnalysis || null,
+    namedPolicies: namedPoliciesResult || null,
+    csp: cspResult || null,
+    frameworks: frameworksDetected.length > 0 ? frameworksDetected : null,
+    frameworkGuidance: Object.keys(frameworkGuidance).length > 0 ? frameworkGuidance : null,
+    scatter: scatterAnalysis || null,
+    firstPartyAliases: firstPartyAliases.length > 0 ? firstPartyAliases : null
+  };
+}
+
 let aiSending = false;
 async function sendAI() {
   const q = $("#ai-input").value.trim();
@@ -514,7 +663,8 @@ async function sendAI() {
 
   try {
     const prov = aiProv !== "auto" ? aiProv : undefined;
-    const resp = await window.AIAssistant.queryAIMultiTurn(aiKey, prov, violations, aiHistory);
+    const analysis = gatherAIAnalysis();
+    const resp = await window.AIAssistant.queryAIMultiTurn(aiKey, prov, violations, aiHistory, analysis);
     removeMsg(tid);
     appendMsg("bot", resp);
     aiHistory.push({ role: "assistant", content: resp });
@@ -534,7 +684,10 @@ function askAIAbout(v) {
   $("#pt-ai").classList.add("active");
   if (!aiKey) { showAISt("Configure API key first.", "info"); return; }
   showAIChat();
-  const q = `Analyze this violation:\nType: ${v.violationType}\nSource: ${v.sourceFile}:${v.lineNumber}\nSample: ${v.sample}\nStack: ${v.stackTrace || "N/A"}`;
+  let q = `Analyze this violation:\nType: ${v.violationType}\nSource: ${v.sourceFile}:${v.lineNumber}`;
+  if (v.sinkName && v.sinkName !== "Unknown sink") q += `\nSink: ${v.sinkName} (${v.sinkCategory || "unknown"})`;
+  if (v.party && v.party !== "unknown") q += `\nOrigin: ${v.party}${v.sourceOrigin ? " (" + v.sourceOrigin + ")" : ""}`;
+  q += `\nSample: ${v.sample}\nStack: ${v.stackTrace || "N/A"}`;
   $("#ai-input").value = q;
   sendAI();
 }
@@ -577,6 +730,439 @@ function fmtAI(text) {
   safe = safe.replace(/%%CODEBLOCK_(\d+)%%/g, (_, i) => codeBlocks[+i]);
 
   return `<p>${safe}</p>`;
+}
+
+// ── First-Party Aliases ──
+
+function bindAliases() {
+  $("#alias-add-btn").addEventListener("click", addAliasFromInput);
+  $("#alias-input").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); addAliasFromInput(); }
+  });
+  $("#alias-suggest-btn").addEventListener("click", fetchAliasSuggestions);
+}
+
+function normalizeHostInput(raw) {
+  let host = raw;
+  try {
+    if (host.includes("://")) host = new URL(host).hostname;
+    else if (host.includes("/")) host = host.split("/")[0];
+    if (host.includes(":")) host = host.split(":")[0];
+  } catch { return null; }
+  host = host.trim().toLowerCase();
+  if (!host) return null;
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host)) return null;
+  return host;
+}
+
+function addAliasFromInput() {
+  const input = $("#alias-input");
+  const raw = input.value.trim();
+  if (!raw) return;
+  const val = normalizeHostInput(raw);
+  if (!val) {
+    input.style.outline = "2px solid #ef4444";
+    setTimeout(() => { input.style.outline = ""; }, 1200);
+    return;
+  }
+  if (firstPartyAliases.includes(val)) { input.value = ""; return; }
+  firstPartyAliases.push(val);
+  input.value = "";
+  saveAliasesAndRefresh();
+}
+
+function removeAlias(host) {
+  firstPartyAliases = firstPartyAliases.filter(a => a !== host);
+  saveAliasesAndRefresh();
+}
+
+function addSuggestedAlias(host) {
+  if (firstPartyAliases.includes(host)) return;
+  firstPartyAliases.push(host);
+  saveAliasesAndRefresh();
+  fetchAliasSuggestions();
+}
+
+function saveAliasesAndRefresh() {
+  renderAliasTags();
+  safeSend({ action: "saveFirstPartyAliases", aliases: firstPartyAliases }, () => {
+    reClassifyAndRefresh();
+  });
+}
+
+function reClassifyAndRefresh() {
+  loadInsights();
+  safeSend({ action: "getFullState", tabId: TAB_ID }, r => {
+    if (!r) return;
+    violations = r.violations || [];
+    renderLiveTable();
+    updateStats();
+  });
+}
+
+function renderAliasTags() {
+  const el = $("#alias-tags");
+  if (firstPartyAliases.length === 0) {
+    el.innerHTML = '<span class="alias-empty">No aliases configured. Use Auto-Suggest or add manually.</span>';
+    return;
+  }
+  el.innerHTML = firstPartyAliases.map(a =>
+    `<span class="alias-tag">${esc(a)}<button class="alias-rm" data-host="${esc(a)}" title="Remove">&times;</button></span>`
+  ).join("");
+  el.querySelectorAll(".alias-rm").forEach(btn => {
+    btn.addEventListener("click", () => removeAlias(btn.dataset.host));
+  });
+}
+
+function fetchAliasSuggestions() {
+  const btn = $("#alias-suggest-btn");
+  btn.textContent = "Scanning...";
+  btn.disabled = true;
+  safeSend({ action: "suggestAliases", tabId: TAB_ID }, r => {
+    btn.textContent = "Auto-Suggest";
+    btn.disabled = false;
+    const el = $("#alias-suggestions");
+    if (!r || !r.suggestions || r.suggestions.length === 0) {
+      el.innerHTML = '<div class="alias-no-suggestions">No suggestions — all third-party origins look genuinely external, or not enough violations captured yet.</div>';
+      return;
+    }
+    let html = '<div class="alias-suggestion-list">';
+    html += '<p class="alias-sug-intro">These domains may be internal CDNs or related assets:</p>';
+    for (const s of r.suggestions) {
+      const alreadyAdded = firstPartyAliases.includes(s.host);
+      html += `<div class="alias-sug-item">
+        <div class="alias-sug-info">
+          <code>${esc(s.host)}</code>
+          <span class="alias-sug-reason">${esc(s.reason)}</span>
+          <span class="ins-count">${s.count} violations</span>
+        </div>
+        <button class="hdr-btn small alias-sug-add" data-host="${esc(s.host)}" ${alreadyAdded ? "disabled" : ""}>${alreadyAdded ? "Added" : "Add"}</button>
+      </div>`;
+    }
+    html += '</div>';
+    el.innerHTML = html;
+    el.querySelectorAll(".alias-sug-add").forEach(b => {
+      b.addEventListener("click", () => {
+        addSuggestedAlias(b.dataset.host);
+        b.textContent = "Added";
+        b.disabled = true;
+      });
+    });
+  });
+}
+
+// ── Insights ──
+
+function scheduleInsightsRefresh() {
+  clearTimeout(insightsDebounce);
+  insightsDebounce = setTimeout(() => {
+    insightsDebounce = null;
+    loadInsights();
+  }, 800);
+}
+
+function cancelInsightsRefresh() {
+  clearTimeout(insightsDebounce);
+  insightsDebounce = null;
+}
+
+function loadInsights() {
+  safeSend({ action: "getOriginAnalysis", tabId: TAB_ID }, r => {
+    if (r) { originAnalysis = r.analysis; renderOriginAnalysis(); }
+  });
+  safeSend({ action: "getSinkMap", tabId: TAB_ID }, r => {
+    if (r) renderSinkMap(r.sinkMap);
+  });
+  safeSend({ action: "getFrameworkInfo", tabId: TAB_ID }, r => {
+    if (r) {
+      frameworksDetected = r.frameworks || [];
+      frameworkGuidance = r.guidance || {};
+      renderFrameworkInfo(r.frameworks, r.guidance);
+    }
+  });
+  safeSend({ action: "getScatterAnalysis", tabId: TAB_ID }, r => {
+    if (r) { scatterAnalysis = r.scatter; renderScatterAnalysis(r.scatter); }
+  });
+  safeSend({ action: "getNamedPolicies", tabId: TAB_ID }, r => {
+    if (r) { namedPoliciesResult = r.result; renderNamedPolicies(r.result); }
+  });
+  safeSend({ action: "getCspHeader", tabId: TAB_ID }, r => {
+    if (r) { cspResult = r.csp; renderCspHeader(r.csp); }
+  });
+}
+
+function renderOriginAnalysis() {
+  if (!originAnalysis) {
+    $("#origin-summary").innerHTML = '<span class="ins-empty">No violations to analyze.</span>';
+    return;
+  }
+  const a = originAnalysis;
+  const total = a.summary.total;
+
+  $("#origin-summary").innerHTML = `
+    <div class="origin-stats">
+      <div class="ostat"><span class="ostat-num ostat-1p">${a.firstParty.count}</span><span class="ostat-lbl">First-party</span></div>
+      <div class="ostat"><span class="ostat-num ostat-3p">${a.thirdParty.count}</span><span class="ostat-lbl">Third-party</span></div>
+      <div class="ostat"><span class="ostat-num">${a.unknown.count}</span><span class="ostat-lbl">Unknown</span></div>
+    </div>`;
+
+  if (total > 0) {
+    let fpW = a.firstParty.count > 0 ? Math.max(1, a.summary.firstPartyPct) : 0;
+    let tpW = a.thirdParty.count > 0 ? Math.max(1, a.summary.thirdPartyPct) : 0;
+    const barSum = fpW + tpW;
+    if (barSum > 100) {
+      const scale = 100 / barSum;
+      fpW = Math.round(fpW * scale);
+      tpW = 100 - fpW;
+    }
+    let barSegs = "";
+    if (a.firstParty.count > 0) barSegs += `<div class="obar-seg obar-1p" style="width:${fpW}%" title="First-party: ${a.firstParty.count}"></div>`;
+    if (a.thirdParty.count > 0) barSegs += `<div class="obar-seg obar-3p" style="width:${tpW}%" title="Third-party: ${a.thirdParty.count}"></div>`;
+    $("#origin-bar").innerHTML = `
+      <div class="obar">${barSegs}</div>
+      <div class="obar-legend">
+        <span class="obar-label"><span class="obar-dot obar-1p-dot"></span> First-party ${a.summary.firstPartyPct}%</span>
+        <span class="obar-label"><span class="obar-dot obar-3p-dot"></span> Third-party ${a.summary.thirdPartyPct}%</span>
+      </div>`;
+  }
+
+  let detailHtml = "";
+  if (a.thirdParty.count > 0) {
+    const origins = Object.entries(a.thirdParty.origins).sort((a, b) => b[1] - a[1]);
+    detailHtml += '<div class="ins-subsec"><h4>Third-party Origins</h4><div class="ins-list">';
+    for (const [origin, count] of origins) {
+      detailHtml += `<div class="ins-list-item"><code>${esc(origin)}</code><span class="ins-count">${count}</span></div>`;
+    }
+    detailHtml += '</div><p class="ins-tip">Third-party violations need targeted named policies or library updates. Fix first-party code first.</p></div>';
+  }
+  $("#origin-details").innerHTML = detailHtml;
+}
+
+function renderSinkMap(sinkMap) {
+  const el = $("#sink-map-content");
+  if (!sinkMap || sinkMap.length === 0) {
+    el.innerHTML = '<span class="ins-empty">No violations to map.</span>';
+    return;
+  }
+
+  const sinkGroups = new Map();
+  for (const entry of sinkMap) {
+    const name = entry.sink.sinkName || "Unknown";
+    if (!sinkGroups.has(name)) {
+      sinkGroups.set(name, { sink: entry.sink, sources: [], count: 0 });
+    }
+    const g = sinkGroups.get(name);
+    g.count++;
+    if (entry.sink.sourceLocation && g.sources.length < 5) {
+      const loc = entry.sink.sourceLocation;
+      if (!g.sources.includes(loc)) g.sources.push(loc);
+    }
+  }
+
+  const sorted = [...sinkGroups.entries()].sort((a, b) => b[1].count - a[1].count);
+
+  let html = '<div class="sink-grid">';
+  for (const [name, data] of sorted) {
+    const catClass = `sink-cat-${data.sink.sinkCategory || "unknown"}`;
+    html += `<div class="sink-card ${catClass}">
+      <div class="sink-card-hdr">
+        <code class="sink-name">${esc(name)}</code>
+        <span class="ins-count">${data.count}x</span>
+      </div>
+      <div class="sink-api">${esc(data.sink.sinkApi || "")}</div>`;
+    if (data.sources.length > 0) {
+      html += '<div class="sink-sources">';
+      for (const loc of data.sources) {
+        html += `<div class="sink-source" title="${esc(loc)}"><span class="sink-src-icon">&#x2192;</span> <code>${esc(loc.length > 60 ? "..." + loc.slice(-57) : loc)}</code></div>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function renderFrameworkInfo(frameworks, guidance) {
+  const el = $("#framework-content");
+  if (!frameworks || frameworks.length === 0) {
+    el.innerHTML = '<span class="ins-empty">No frameworks detected from violation data. This analysis improves as more violations are captured.</span>';
+    return;
+  }
+
+  let html = '<div class="fw-list">';
+  for (const fw of frameworks) {
+    const g = guidance[fw.name];
+    html += `<div class="fw-card">
+      <div class="fw-hdr">
+        <strong class="fw-name">${esc(fw.name)}</strong>
+        <span class="badge b-1p">${esc(fw.confidence)}</span>
+      </div>`;
+    if (g) {
+      html += `<p class="fw-tip">${esc(g.tip)}</p>`;
+      html += '<div class="fw-steps"><h4>Recommended Steps</h4><ol>';
+      for (const step of g.fixSteps) {
+        html += `<li>${esc(step)}</li>`;
+      }
+      html += '</ol></div>';
+      if (g.policyPattern) {
+        html += `<div class="fw-code-wrap"><h4>Policy Pattern</h4><div class="code-wrap"><button class="copy-code fw-copy">Copy</button><pre class="code-pre">${esc(g.policyPattern)}</pre></div></div>`;
+      }
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+
+  el.querySelectorAll(".fw-copy").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 1200);
+    });
+  });
+}
+
+function renderScatterAnalysis(scatter) {
+  const el = $("#scatter-content");
+  if (!scatter) {
+    el.innerHTML = '<span class="ins-empty">No scatter data available.</span>';
+    return;
+  }
+
+  const sevClass = scatter.severity === "high" ? "sev-critical" : scatter.severity === "medium" ? "sev-high" : "sev-medium";
+
+  let html = `<div class="scatter-summary">
+    <div class="scatter-indicator">
+      <span class="sev-badge ${sevClass}">${esc(scatter.severity)} scatter</span>
+      <span class="scatter-stat">${scatter.sourceFileCount} source files, ${scatter.sourceOriginCount} origins</span>
+    </div>
+    <p class="scatter-msg">${esc(scatter.message)}</p>
+  </div>`;
+
+  if (scatter.isScattered) {
+    html += '<div class="scatter-rec"><h4>Centralization Recommendation</h4>';
+    html += '<ol class="scatter-steps">';
+    for (const step of scatter.steps) {
+      html += `<li>${esc(step)}</li>`;
+    }
+    html += '</ol>';
+    if (scatter.modulePattern) {
+      html += '<div class="code-wrap"><button class="copy-code scatter-copy">Copy</button><pre class="code-pre">' + esc(scatter.modulePattern) + '</pre></div>';
+    }
+    html += '</div>';
+  }
+
+  if (scatter.sourceSummary && scatter.sourceSummary.length > 0) {
+    html += '<div class="scatter-sources"><h4>Violations by Source File</h4><div class="ins-list">';
+    for (const src of scatter.sourceSummary.slice(0, 15)) {
+      const shortFile = src.file.length > 60 ? "..." + src.file.slice(-57) : src.file;
+      html += `<div class="ins-list-item">
+        <div><code title="${esc(src.file)}">${esc(shortFile)}</code>
+          <span class="sink-tags">${src.sinks.map(s => `<span class="sink-tag">${esc(s)}</span>`).join("")}</span>
+        </div>
+        <span class="ins-count">${src.violationCount}</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  el.innerHTML = html;
+
+  el.querySelectorAll(".scatter-copy").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 1200);
+    });
+  });
+}
+
+function renderNamedPolicies(result) {
+  const el = $("#named-policies-content");
+  if (!result || result.policies.length === 0) {
+    el.innerHTML = '<span class="ins-empty">No violations available to generate policy recommendations. Capture violations first.</span>';
+    return;
+  }
+
+  let html = `<div class="np-summary">
+    <span>${result.totalPolicies} named ${result.totalPolicies === 1 ? "policy" : "policies"} recommended</span>
+    <span class="np-names">${result.policyNames.map(n => `<code>${esc(n)}</code>`).join(" ")}</span>
+  </div>`;
+
+  html += '<div class="np-list">';
+  for (const p of result.policies) {
+    const bc = p.type === "TrustedHTML" ? "b-html" : p.type === "TrustedScript" ? "b-script" : "b-url";
+    html += `<div class="np-card">
+      <div class="np-hdr">
+        <code class="np-name">${esc(p.name)}</code>
+        <span class="badge ${bc}">${esc(p.type)}</span>
+        <span class="ins-count">${p.violationCount} violations</span>
+      </div>
+      <p class="np-desc">${esc(p.description)}</p>
+      <div class="code-wrap"><button class="copy-code np-copy">Copy</button><pre class="code-pre">${esc(p.code)}</pre></div>
+    </div>`;
+  }
+  html += '</div>';
+
+  if (result.centralizationModule) {
+    html += `<div class="np-module">
+      <h4>Centralized Module (Copy All)</h4>
+      <div class="code-wrap"><button class="copy-code np-copy-module">Copy Module</button><pre class="code-pre">${esc(result.centralizationModule)}</pre></div>
+    </div>`;
+  }
+
+  el.innerHTML = html;
+
+  el.querySelectorAll(".np-copy, .np-copy-module").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 1200);
+    });
+  });
+}
+
+function renderCspHeader(csp) {
+  const el = $("#csp-content");
+  if (!csp) {
+    el.innerHTML = '<span class="ins-empty">No CSP data available.</span>';
+    return;
+  }
+
+  let html = '<div class="csp-section">';
+  html += `<p class="csp-explanation">${esc(csp.explanation)}</p>`;
+
+  const items = [
+    { label: "Report-Only (test first)", value: csp.reportOnly, rec: true },
+    { label: "Enforcing", value: csp.enforcing },
+  ];
+  if (csp.withDefault) items.push({ label: "With default fallback", value: csp.withDefault });
+  if (csp.metaTag) items.push({ label: "HTML meta tag", value: csp.metaTag });
+  if (csp.nginxConfig) items.push({ label: "Nginx config", value: csp.nginxConfig });
+  if (csp.apacheConfig) items.push({ label: "Apache config", value: csp.apacheConfig });
+
+  for (const item of items) {
+    html += `<div class="csp-item${item.rec ? " csp-recommended" : ""}">
+      <div class="csp-item-hdr"><strong>${esc(item.label)}</strong>${item.rec ? '<span class="badge b-1p">Recommended first</span>' : ""}</div>
+      <div class="code-wrap"><button class="copy-code csp-copy">Copy</button><pre class="code-pre">${esc(item.value)}</pre></div>
+    </div>`;
+  }
+  html += '</div>';
+
+  el.innerHTML = html;
+
+  el.querySelectorAll(".csp-copy").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 1200);
+    });
+  });
 }
 
 // ── Export ──

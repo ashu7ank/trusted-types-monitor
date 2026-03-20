@@ -40,30 +40,64 @@
 <body>
   <h1>How to Test the Trusted Types Monitor Extension</h1>
   
-  <p>This guide will help you test whether the Trusted Types Monitor extension is correctly capturing violations.</p>
+  <p>
+    This guide helps you verify that Trusted Types Monitor is capturing <code>trusted-types</code> CSP violations and
+    that the DevTools panel features (live stream, clustering, fix guide, policy generation, export, optional AI) work end-to-end.
+  </p>
+  
+  <div class="note">
+    <strong>Important:</strong> Trusted Types violations only happen on pages that enforce/report Trusted Types via CSP,
+    e.g. <code>Content-Security-Policy: require-trusted-types-for 'script'</code> (or a matching Report-Only header).
+    The included <a href="test-page.html">Test Page</a> sets a CSP that requires Trusted Types.
+  </div>
   
   <h2>Method 1: Using the Test Page</h2>
   
   <div class="step">
     <h3>Step 1: Open the Test Page</h3>
-    <p>Open the <a href="test-page.html">Test Page</a> included with this extension.</p>
+    <p>Open the <a href="test-page.html">Test Page</a> included with this repo.</p>
+    <div class="note">
+      <strong>If you open it as a local file:</strong> in Chrome go to <code>chrome://extensions</code> → open this extension’s details →
+      enable <strong>Allow access to file URLs</strong>, otherwise the content script may not run on <code>file://</code> pages.
+    </div>
   </div>
   
   <div class="step">
-    <h3>Step 2: Click the Test Buttons</h3>
-    <p>The test page contains several buttons that will trigger different types of Trusted Types violations. Click each button to generate violations.</p>
+    <h3>Step 2: Open DevTools → Trusted Types Monitor panel</h3>
+    <p>
+      Open DevTools on the test page and select the <strong>Trusted Types Monitor</strong> panel (it may be under the <code>&raquo;</code> overflow menu).
+      Ensure the <strong>Monitoring</strong> toggle is enabled.
+    </p>
   </div>
   
   <div class="step">
-    <h3>Step 3: Check the Extension Popup</h3>
-    <p>Click on the extension icon in your browser toolbar to open the popup. You should see the violations that were generated.</p>
+    <h3>Step 3: Generate violations</h3>
+    <p>
+      On the test page, click <strong>Run all unsafe tests</strong> (or click individual buttons). These trigger common unsafe sinks
+      like <code>innerHTML</code>, <code>insertAdjacentHTML</code>, <code>eval</code>, and dynamic script injection.
+    </p>
+    <div class="note">
+      <strong>Expected:</strong> the DevTools panel should start listing violations for the current tab. If CSP is enforcing,
+      some buttons may throw <code>TypeError</code>; that’s OK—violations should still be observable/captured.
+    </div>
   </div>
   
-  <h2>Method 2: Using the Browser Console</h2>
+  <div class="step">
+    <h3>Step 4: Sanity check “safe” policy tests</h3>
+    <p>
+      Click <strong>Run all policy tests</strong>. These use a demo Trusted Types policy (named <code>tt-monitor-demo</code>) and should
+      generally <strong>not</strong> add new Trusted Types violations (they may still fail if policy creation is blocked by CSP).
+    </p>
+  </div>
+  
+  <h2>Method 2: Trigger a violation on any TT-enforced page</h2>
   
   <div class="step">
     <h3>Step 1: Open a Web Page</h3>
-    <p>Navigate to any web page.</p>
+    <p>
+      Navigate to a page that enforces or reports Trusted Types via CSP
+      (for example, an internal test environment or a site that already uses <code>require-trusted-types-for 'script'</code>).
+    </p>
   </div>
   
   <div class="step">
@@ -73,50 +107,75 @@
   
   <div class="step">
     <h3>Step 3: Generate a Test Violation</h3>
-    <p>Run the following command in the console:</p>
-    <pre>window._generateTrustedTypesViolation()</pre>
-    <p>This will generate a test violation that should be captured by the extension.</p>
+    <p>Run one of the following commands (choose a sink that exists on your page):</p>
+    <pre>
+// HTML sink (TrustedHTML)
+document.body.insertAdjacentHTML('beforeend', '&lt;img src=x onerror=console.log("tt-test")&gt;');
+
+// Script sink (TrustedScript)
+eval('console.log("tt-test: eval")');
+    </pre>
+    <div class="note">
+      <strong>Expected:</strong> under enforcing CSP, these may throw (often <code>TypeError</code>). The goal is to trigger a
+      Trusted Types CSP violation signal that the monitor captures for the tab.
+    </div>
   </div>
   
   <div class="step">
-    <h3>Step 4: Check the Extension Popup</h3>
-    <p>Click on the extension icon to see if the violation was captured.</p>
+    <h3>Step 4: Check the DevTools panel</h3>
+    <p>
+      Open DevTools → <strong>Trusted Types Monitor</strong>. The <strong>Live</strong> table should show new rows for the current tab.
+      Use the search box to filter by URL, directive, sample, or source file.
+    </p>
   </div>
   
-  <h2>Method 3: Visit Websites with DOM Manipulation</h2>
+  <h2>Method 3: Validate panel features (clusters, fixes, policies, export, AI)</h2>
   
   <div class="step">
-    <h3>Step 1: Visit Interactive Websites</h3>
-    <p>Navigate to websites that use a lot of JavaScript and DOM manipulation, such as social media sites, web apps, or interactive content.</p>
+    <h3>Step 1: Clusters</h3>
+    <p>
+      After generating a handful of violations, open the <strong>Clusters</strong> tab. You should see grouped issues by type/root cause.
+      Click <strong>Get Fix</strong> on a cluster to jump into the fix guide.
+    </p>
   </div>
   
   <div class="step">
-    <h3>Step 2: Interact with the Website</h3>
-    <p>Use the website normally, clicking buttons, filling forms, etc. Many modern websites will trigger Trusted Types violations during normal usage.</p>
+    <h3>Step 2: Fix guide</h3>
+    <p>
+      In the <strong>Live</strong> table, click <strong>Fix</strong> on a row. The fix guide should show explanation, steps, and a copyable code example.
+    </p>
   </div>
   
   <div class="step">
-    <h3>Step 3: Check the Extension Popup</h3>
-    <p>Open the extension popup to see if any violations were captured.</p>
+    <h3>Step 3: Policy generator</h3>
+    <p>
+      Open the <strong>Policy</strong> tab and click <strong>Generate</strong>.
+      Try both modes (the default policy generator and the “Perfect Types”/Sanitizer <code>setHTML()</code>-oriented mode, if present)
+      and verify the output and warnings update.
+    </p>
+  </div>
+  
+  <div class="step">
+    <h3>Step 4 (optional): AI assistant</h3>
+    <p>
+      Open the <strong>AI</strong> tab, save an API key (and provider if applicable), then ask about a specific violation using
+      <strong>Ask AI</strong> from the violation sidebar or fix guide.
+    </p>
   </div>
   
   <div class="note">
-    <strong>Note:</strong> If you're not seeing any violations, try clicking the "Refresh Data" button in the extension popup. Some violations may take a moment to be processed and stored.
-  </div>
-  
-  <div class="note">
-    <strong>Viewing Violation Details:</strong> Click the "Details" button next to any violation to see complete information. The details panel supports scrolling for long content and provides formatted display of code samples.
+    <strong>Tip:</strong> You can use <strong>Export</strong> to download the captured violations for the current tab as JSON.
   </div>
   
   <h2>Troubleshooting</h2>
   
   <p>If you're not seeing any violations:</p>
   <ul>
-    <li>Make sure the extension is enabled</li>
-    <li>Check the browser console for any error messages</li>
-    <li>Try reloading the page</li>
-    <li>Try a different website</li>
-    <li>Make sure your browser supports Trusted Types (most modern browsers do)</li>
+    <li>Make sure <strong>Monitoring</strong> is enabled in the DevTools panel</li>
+    <li>Make sure the page actually enforces/reports Trusted Types via CSP (the included <code>test-page.html</code> does)</li>
+    <li>If using <code>file://</code> for the test page, enable <strong>Allow access to file URLs</strong> for the extension</li>
+    <li>Reload the page and keep DevTools open while generating violations</li>
+    <li>Check the Console for thrown <code>TypeError</code> or CSP-related messages (expected under enforcement)</li>
   </ul>
   
   <p>If you continue to have issues, try restarting your browser or reinstalling the extension.</p>
