@@ -7,12 +7,12 @@
       "responseHeaders": [
         {
           "header": "Content-Security-Policy-Report-Only",
-          "operation": "set",
+          "operation": "append",
           "value": "require-trusted-types-for 'script'; report-uri /trusted-types-violation; report-to csp-endpoint"
         },
         {
           "header": "Reporting-Endpoints",
-          "operation": "set",
+          "operation": "append",
           "value": "csp-endpoint=\"/trusted-types-violation\""
         }
       ]
