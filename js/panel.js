@@ -6,9 +6,12 @@ const esc = s => String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replac
 
 const TAB_ID = chrome.devtools.inspectedWindow.tabId;
 const MAX_PANEL_VIOLATIONS = 1000;
-const MAX_RENDERED_ROWS = 200;
+const PAGE_SIZE = 100;
 let violations = [];
 let clusters = [];
+let dupCounts = new Map();
+let totalOccurrences = 0;
+let currentPage = 0;
 let currentDetail = null;
 let originAnalysis = null;
 let frameworksDetected = [];
@@ -19,10 +22,13 @@ let cspResult = null;
 let firstPartyAliases = [];
 let currentSort = { field: "timestamp", ascending: false };
 let searchTerm = "";
-let aiKey = "", aiProv = "auto";
+let aiKey = "", aiProv = "auto", aiModel = "";
 let aiHistory = [];
 let insightsDebounce = null;
 let clearPending = false;
+let renderScheduled = false;
+let clusterRefreshTimer = null;
+let lastDomPurifyDiff = null;
 
 // ── Extension context guards ──
 
@@ -65,6 +71,14 @@ function connectPort() {
   port.onMessage.addListener(msg => {
     if (!contextAlive()) return;
 
+    if (msg.action === "monitoringToggled") {
+      $("#monitoring-toggle").checked = msg.enabled;
+      if (!msg.enabled) {
+        resetPanelState();
+      }
+      return;
+    }
+
     if (msg.action === "navigationReset") {
       resetPanelState();
       return;
@@ -78,16 +92,20 @@ function connectPort() {
       if (violations.length > MAX_PANEL_VIOLATIONS) {
         violations = violations.slice(-MAX_PANEL_VIOLATIONS);
       }
-      renderLiveTable();
-      updateStats();
-      safeSend({ action: "getClusters", tabId: TAB_ID }, r => {
-        if (!r) return;
-        clusters = r.clusters || [];
-        if ($("#pt-clusters").classList.contains("active")) renderClusters();
-      });
+      totalOccurrences++;
+      scheduleRender();
+      scheduleClusterRefresh();
       if ($("#pt-insights").classList.contains("active")) {
         scheduleInsightsRefresh();
       }
+    }
+
+    if (msg.action === "dupCountUpdated") {
+      if (clearPending) return;
+      dupCounts.set(msg.hash, msg.count);
+      totalOccurrences++;
+      scheduleRender();
+      return;
     }
   });
 
@@ -122,8 +140,14 @@ function checkForPageChange() {
 
     safeSend({ action: "getFullState", tabId: TAB_ID }, r => {
       if (!r) return;
+      const enabled = r.enabled !== false;
+      $("#monitoring-toggle").checked = enabled;
       violations = r.violations || [];
       clusters = r.clusters || [];
+      if (r.dupCounts) {
+        dupCounts = new Map(Object.entries(r.dupCounts));
+      }
+      totalOccurrences = r.totalOccurrences || violations.length;
       renderLiveTable();
       renderClusters();
       updateStats();
@@ -164,6 +188,9 @@ document.addEventListener("visibilitychange", () => {
 function resetPanelState() {
   violations = [];
   clusters = [];
+  dupCounts = new Map();
+  totalOccurrences = 0;
+  currentPage = 0;
   currentDetail = null;
   aiHistory = [];
   searchTerm = "";
@@ -174,6 +201,7 @@ function resetPanelState() {
   namedPoliciesResult = null;
   cspResult = null;
   cancelInsightsRefresh();
+  cancelClusterRefresh();
   // firstPartyAliases intentionally NOT reset — they are user config, not per-page state
 
   const searchBox = $("#search-input");
@@ -200,12 +228,14 @@ function resetPanelState() {
 
   // Reset policy output
   $("#policy-output").textContent = '// Click "Generate" to create a policy from observed violations';
-  $("#policy-warnings").innerHTML = "";
+  safeClear($("#policy-warnings"));
+  lastDomPurifyDiff = null;
+  renderDomPurifyDiffSection(null);
   $("#btn-gen-policy").textContent = "Generate";
 
   // Clear AI chat messages
   const msgs = $("#ai-messages");
-  if (msgs) msgs.innerHTML = "";
+  if (msgs) safeClear(msgs);
 }
 
 // ── Init ──
@@ -232,15 +262,25 @@ function loadState() {
     if (!r) return;
     violations = r.violations || [];
     clusters = r.clusters || [];
+    if (r.dupCounts) {
+      dupCounts = new Map(Object.entries(r.dupCounts));
+    }
+    totalOccurrences = r.totalOccurrences || violations.length;
     originAnalysis = r.originAnalysis || null;
     frameworksDetected = r.frameworks || [];
     scatterAnalysis = r.scatter || null;
     firstPartyAliases = r.firstPartyAliases || [];
     aiKey = (r.apiKeys || {}).key || "";
     aiProv = (r.apiKeys || {}).provider || "auto";
+    aiModel = (r.apiKeys || {}).model || "";
     const enabled = r.enabled !== false;
     $("#monitoring-toggle").checked = enabled;
-    if (aiKey) { $("#ai-key").value = aiKey; $("#ai-provider").value = aiProv; showAIChat(); }
+    if (aiKey) {
+      $("#ai-key").value = aiKey;
+      const provEl = $("#ai-provider");
+      if (provEl) provEl.value = aiProv;
+      showAIChat();
+    }
     renderLiveTable();
     renderClusters();
     updateStats();
@@ -277,10 +317,15 @@ function bindTabs() {
 
 function bindHeader() {
   $("#monitoring-toggle").addEventListener("change", e => {
-    safeSend({ action: "setEnabled", enabled: e.target.checked });
+    const enabled = e.target.checked;
+    safeSend({ action: "setEnabled", enabled });
+    if (!enabled) {
+      resetPanelState();
+    }
   });
   $("#search-input").addEventListener("input", e => {
     searchTerm = e.target.value.toLowerCase();
+    currentPage = 0;
     renderLiveTable();
   });
   $("#btn-export").addEventListener("click", exportData);
@@ -290,13 +335,33 @@ function bindHeader() {
     safeSend({ action: "clearViolations", tabId: TAB_ID }, () => {
       resetPanelState();
       clearPending = false;
+      safeSend({ action: "getViolations", tabId: TAB_ID }, r => {
+        if (!r) return;
+        const fresh = (r.violations || []).filter(v => v.tabId === TAB_ID);
+        if (fresh.length > 0) {
+          violations = fresh;
+          renderLiveTable();
+          updateStats();
+        }
+      });
     });
   });
 }
 
 function updateStats() {
   const f = filtered();
-  $("#s-total").textContent = f.length;
+  const uniqueCount = f.length;
+  $("#s-unique").textContent = uniqueCount;
+  const totalOccEl = $("#s-total-occ");
+  const totalOccWrap = $("#hstat-total-occ");
+  if (totalOccurrences > uniqueCount) {
+    totalOccEl.textContent = totalOccurrences;
+    totalOccEl.title = `${totalOccurrences} total occurrences (including ${totalOccurrences - uniqueCount} duplicates)`;
+    if (totalOccWrap) totalOccWrap.classList.remove("hidden");
+  } else {
+    totalOccEl.textContent = uniqueCount;
+    if (totalOccWrap) totalOccWrap.classList.add("hidden");
+  }
   $("#s-html").textContent = f.filter(v => v.violationType === "TrustedHTML").length;
   $("#s-script").textContent = f.filter(v => v.violationType === "TrustedScript").length;
   $("#s-url").textContent = f.filter(v => v.violationType === "TrustedScriptURL").length;
@@ -314,6 +379,35 @@ function filtered() {
   );
 }
 
+// ── Render Scheduling ──
+
+function scheduleRender() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    renderLiveTable();
+    updateStats();
+  });
+}
+
+function scheduleClusterRefresh() {
+  if (clusterRefreshTimer) return;
+  clusterRefreshTimer = setTimeout(() => {
+    clusterRefreshTimer = null;
+    safeSend({ action: "getClusters", tabId: TAB_ID }, r => {
+      if (!r) return;
+      clusters = r.clusters || [];
+      if ($("#pt-clusters").classList.contains("active")) renderClusters();
+      updateStats();
+    });
+  }, 500);
+}
+
+function cancelClusterRefresh() {
+  if (clusterRefreshTimer) { clearTimeout(clusterRefreshTimer); clusterRefreshTimer = null; }
+}
+
 // ── Live Stream ──
 
 function bindLive() {
@@ -321,16 +415,18 @@ function bindLive() {
     const f = th.dataset.sort;
     if (currentSort.field === f) currentSort.ascending = !currentSort.ascending;
     else { currentSort.field = f; currentSort.ascending = f !== "timestamp"; }
+    currentPage = 0;
     renderLiveTable();
   }));
 }
 
 function renderLiveTable() {
   const tbody = $("#live-body");
-  tbody.innerHTML = "";
+  safeClear(tbody);
   const list = filtered();
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="t-empty">No violations on this tab. Browse pages to capture Trusted Types issues.</td></tr>';
+    safeHTML(tbody, '<tr><td colspan="7" class="t-empty">No violations on this tab. Browse pages to capture Trusted Types issues.</td></tr>');
+    renderPagination(0, 0);
     return;
   }
   const sorted = [...list].sort((a, b) => {
@@ -338,13 +434,38 @@ function renderLiveTable() {
     let c = fa < fb ? -1 : fa > fb ? 1 : 0;
     return currentSort.ascending ? c : -c;
   });
-  const display = sorted.slice(0, MAX_RENDERED_ROWS);
+  const totalPages = Math.ceil(sorted.length / PAGE_SIZE);
+  if (currentPage >= totalPages) currentPage = totalPages - 1;
+  if (currentPage < 0) currentPage = 0;
+  const start = currentPage * PAGE_SIZE;
+  const display = sorted.slice(start, start + PAGE_SIZE);
   display.forEach((v, i) => renderLiveRow(v, i, tbody));
-  if (sorted.length > MAX_RENDERED_ROWS) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="7" class="t-empty">Showing ${MAX_RENDERED_ROWS} of ${sorted.length} violations. Use search to narrow results.</td>`;
-    tbody.appendChild(tr);
+  renderPagination(sorted.length, totalPages);
+}
+
+function renderPagination(totalCount, totalPages) {
+  const el = $("#pagination-controls");
+  if (!el) return;
+  if (totalCount === 0 || totalPages <= 1) {
+    if (totalCount > 0) {
+      safeHTML(el, `<span class="page-info">Showing all ${totalCount} unique violations</span>`);
+    } else {
+      safeClear(el);
+    }
+    return;
   }
+  const start = currentPage * PAGE_SIZE + 1;
+  const end = Math.min((currentPage + 1) * PAGE_SIZE, totalCount);
+  safeHTML(el, `
+    <button class="page-btn" id="page-first" ${currentPage === 0 ? "disabled" : ""}>&laquo;</button>
+    <button class="page-btn" id="page-prev" ${currentPage === 0 ? "disabled" : ""}>&lsaquo;</button>
+    <span class="page-info">${start}&ndash;${end} of ${totalCount} unique violations</span>
+    <button class="page-btn" id="page-next" ${currentPage >= totalPages - 1 ? "disabled" : ""}>&rsaquo;</button>
+    <button class="page-btn" id="page-last" ${currentPage >= totalPages - 1 ? "disabled" : ""}>&raquo;</button>`);
+  $("#page-first")?.addEventListener("click", () => { currentPage = 0; renderLiveTable(); });
+  $("#page-prev")?.addEventListener("click", () => { currentPage = Math.max(0, currentPage - 1); renderLiveTable(); });
+  $("#page-next")?.addEventListener("click", () => { currentPage = Math.min(totalPages - 1, currentPage + 1); renderLiveTable(); });
+  $("#page-last")?.addEventListener("click", () => { currentPage = totalPages - 1; renderLiveTable(); });
 }
 
 function renderLiveRow(v, idx, tbody) {
@@ -356,20 +477,22 @@ function renderLiveRow(v, idx, tbody) {
     : "";
   const sample = esc((v.sample || "").substring(0, 80));
   const sinkName = esc(v.sinkName || "—");
+  const count = v.hash ? (dupCounts.get(v.hash) || 1) : 1;
+  const countBadge = count > 1 ? ` <span class="badge b-dup" title="${count} occurrences">${count}x</span>` : "";
   const partyBadge = v.party === "third-party"
     ? '<span class="badge b-3p">3rd party</span>'
     : v.party === "first-party"
     ? '<span class="badge b-1p">1st party</span>'
     : '<span class="badge b-unknown">—</span>';
 
-  tr.innerHTML = `
+  safeHTML(tr, `
     <td class="t-time">${esc(time)}</td>
-    <td><span class="badge ${bc}">${esc(v.violationType || "?")}</span></td>
+    <td><span class="badge ${bc}">${esc(v.violationType || "?")}</span>${countBadge}</td>
     <td class="t-sink" title="${sinkName}">${sinkName}</td>
     <td class="t-sample" title="${esc(v.sample || "")}">${sample}</td>
     <td class="t-source" title="${esc(v.sourceFile || "")}">${esc(src)}</td>
     <td class="t-party">${partyBadge}</td>
-    <td class="t-acts"><button class="row-btn" data-act="detail">Info</button> <button class="row-btn fix" data-act="fix">Fix</button></td>`;
+    <td class="t-acts"><button class="row-btn" data-act="detail">Info</button> <button class="row-btn fix" data-act="fix">Fix</button></td>`);
 
   tr.querySelector('[data-act="detail"]').addEventListener("click", () => showSidebar(v));
   tr.querySelector('[data-act="fix"]').addEventListener("click", () => showFixFor(v));
@@ -400,7 +523,7 @@ function showSidebar(v) {
     ? '<span class="badge b-3p">Third-party</span>'
     : v.party === "first-party"
     ? '<span class="badge b-1p">First-party</span>'
-    : null;
+    : '<span class="badge b-unknown">Unknown</span>';
 
   const sinkLabel = v.sinkName && v.sinkName !== "Unknown sink"
     ? `<code>${esc(v.sinkName)}</code>`
@@ -421,9 +544,9 @@ function showSidebar(v) {
     ["Stack", v.stackTrace ? `<pre class="code-pre">${esc(v.stackTrace)}</pre>` : null]
   ].filter(f => f[1]);
 
-  body.innerHTML = fields.map(([l, val]) =>
+  safeHTML(body, fields.map(([l, val]) =>
     `<div class="sd-row"><span class="sd-label">${l}</span><span class="sd-value">${val}</span></div>`
-  ).join("");
+  ).join(""));
 
   body.querySelectorAll("a").forEach(a => a.addEventListener("click", e => { e.preventDefault(); chrome.tabs.create({ url: a.href }); }));
   $("#detail-sidebar").classList.remove("hidden");
@@ -435,8 +558,8 @@ function closeSidebar() { $("#detail-sidebar").classList.add("hidden"); }
 
 function renderClusters() {
   const c = $("#clusters-container");
-  if (clusters.length === 0) { c.innerHTML = '<div class="t-empty">No clusters yet.</div>'; return; }
-  c.innerHTML = clusters.map((cl, i) => {
+  if (clusters.length === 0) { safeHTML(c, '<div class="t-empty">No clusters yet.</div>'); return; }
+  safeHTML(c, clusters.map((cl, i) => {
     const bc = badgeClass(cl.violationType);
     return `<div class="cl-card">
       <div class="cl-top"><span class="badge ${bc}">${esc(cl.violationType)}</span><span class="cl-count">${cl.count}x</span></div>
@@ -445,7 +568,7 @@ function renderClusters() {
       <div class="cl-meta"><span>First: ${new Date(cl.firstSeen).toLocaleTimeString()}</span></div>
       <div class="cl-btns"><button class="row-btn fix" data-ci="${i}">Get Fix</button></div>
     </div>`;
-  }).join("");
+  }).join(""));
   c.querySelectorAll("[data-ci]").forEach(b => b.addEventListener("click", () => {
     showFixFor(clusters[+b.dataset.ci].violations[0]);
   }));
@@ -508,7 +631,7 @@ function showFixFor(v) {
 
     h += `<div class="fix-sec"><h3>References</h3><ul class="ref-list">${g.references.map(r => `<li><a href="${esc(r.url)}" target="_blank">${esc(r.title)}</a></li>`).join("")}</ul></div>`;
     if (aiKey) h += `<button class="hdr-btn primary" id="fix-ask-ai" style="margin-top:6px">Ask AI for Deeper Analysis</button>`;
-    $("#fix-detail-body").innerHTML = h;
+    safeHTML($("#fix-detail-body"), h);
     $("#cc-fix")?.addEventListener("click", () => { navigator.clipboard.writeText($("#fix-code-block").textContent); $("#cc-fix").textContent = "Copied!"; setTimeout(() => $("#cc-fix").textContent = "Copy", 1200); });
     $$(".cc-fw").forEach(btn => btn.addEventListener("click", () => {
       const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
@@ -534,13 +657,37 @@ function bindPolicy() {
   }));
 
   $("#btn-gen-policy").addEventListener("click", () => {
-    $("#btn-gen-policy").textContent = "Generating...";
-    safeSend({ action: "generatePolicy", tabId: TAB_ID, mode: policyMode }, r => {
-      if (!r) { $("#btn-gen-policy").textContent = "Generate"; return; }
-      $("#policy-output").textContent = r.policy;
-      renderPolicyWarnings();
-      $("#btn-gen-policy").textContent = "Regenerate";
-    });
+    const btn = $("#btn-gen-policy");
+    btn.textContent = "Generating...";
+    btn.disabled = true;
+
+    if (policyMode === "standard") {
+      btn.textContent = "Analyzing with DOMPurify...";
+      safeSend({ action: "getDomPurifyAnalysis", tabId: TAB_ID }, dpResult => {
+        const diff = (dpResult && dpResult.analysis && dpResult.analysis.summary)
+          ? dpResult.analysis : null;
+        lastDomPurifyDiff = diff;
+        btn.textContent = "Generating policy...";
+        safeSend({ action: "generatePolicy", tabId: TAB_ID, mode: policyMode, domPurifyDiff: diff }, r => {
+          btn.disabled = false;
+          if (!r) { btn.textContent = "Generate"; return; }
+          $("#policy-output").textContent = r.policy;
+          renderPolicyWarnings();
+          renderDomPurifyDiffSection(diff);
+          btn.textContent = "Regenerate";
+        });
+      });
+    } else {
+      lastDomPurifyDiff = null;
+      safeSend({ action: "generatePolicy", tabId: TAB_ID, mode: policyMode }, r => {
+        btn.disabled = false;
+        if (!r) { btn.textContent = "Generate"; return; }
+        $("#policy-output").textContent = r.policy;
+        renderPolicyWarnings();
+        renderDomPurifyDiffSection(null);
+        btn.textContent = "Regenerate";
+      });
+    }
   });
   $("#btn-copy-policy").addEventListener("click", () => {
     navigator.clipboard.writeText($("#policy-output").textContent);
@@ -549,24 +696,117 @@ function bindPolicy() {
   });
 }
 
+function renderDomPurifyDiffSection(diff) {
+  let el = $("#dompurify-diff");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "dompurify-diff";
+    const warningsEl = $("#policy-warnings");
+    if (warningsEl && warningsEl.parentNode) {
+      warningsEl.parentNode.insertBefore(el, warningsEl.nextSibling);
+    }
+  }
+
+  if (!diff || !diff.summary) {
+    safeClear(el);
+    return;
+  }
+
+  const s = diff.summary;
+  let h = '<div class="dp-section"><h3 class="dp-title">DOMPurify Differential Analysis</h3>';
+  h += `<p class="dp-desc">${esc(s.recommendation.split("\n")[0])}</p>`;
+
+  h += '<div class="dp-stats">';
+  h += `<span class="dp-stat"><strong>${s.totalSamples}</strong> samples tested</span>`;
+  h += `<span class="dp-stat dp-ok"><strong>${s.samplesUnchanged}</strong> unchanged</span>`;
+  h += `<span class="dp-stat dp-warn"><strong>${s.samplesChanged}</strong> modified</span>`;
+  h += '</div>';
+
+  if (s.strippedTags.length > 0) {
+    h += '<div class="dp-detail"><strong>Stripped tags:</strong> ';
+    h += s.strippedTags.map(t => {
+      const dangerous = ["script", "iframe", "object", "embed", "applet", "form", "base"].includes(t);
+      return `<code class="${dangerous ? "dp-danger" : "dp-safe"}">&lt;${esc(t)}&gt;</code>`;
+    }).join(" ");
+    h += '</div>';
+  }
+
+  if (s.strippedAttrs.length > 0) {
+    h += '<div class="dp-detail"><strong>Stripped attributes:</strong> ';
+    h += s.strippedAttrs.map(a => {
+      const dangerous = a.startsWith("on");
+      return `<code class="${dangerous ? "dp-danger" : "dp-safe"}">${esc(a)}</code>`;
+    }).join(" ");
+    h += '</div>';
+  }
+
+  if (s.survivedTags.length > 0) {
+    h += '<div class="dp-detail"><strong>Survived tags:</strong> ';
+    h += s.survivedTags.map(t => `<code class="dp-ok-tag">&lt;${esc(t)}&gt;</code>`).join(" ");
+    h += '</div>';
+  }
+
+  if (s.allowlistSuggestion) {
+    const sug = s.allowlistSuggestion;
+    h += '<div class="dp-allowlist"><strong>Suggested DOMPurify config:</strong>';
+    h += '<div class="code-wrap"><button class="copy-code dp-copy">Copy</button>';
+    h += '<pre class="code-pre" id="dp-config-code">DOMPurify.sanitize(input, {\n';
+    if (sug.ADD_TAGS.length > 0) {
+      h += `  ADD_TAGS: [${sug.ADD_TAGS.map(t => `'${esc(t)}'`).join(", ")}],\n`;
+    }
+    if (sug.ADD_ATTR.length > 0) {
+      h += `  ADD_ATTR: [${sug.ADD_ATTR.map(a => `'${esc(a)}'`).join(", ")}],\n`;
+    }
+    h += '})</pre></div></div>';
+  }
+
+  if (diff.samples && diff.samples.length > 0) {
+    const changed = diff.samples.filter(s => s.diff && s.diff.contentChanged);
+    if (changed.length > 0) {
+      h += '<details class="dp-samples"><summary>Show modified samples (' + changed.length + ')</summary>';
+      for (const item of changed.slice(0, 8)) {
+        h += '<div class="dp-sample-pair">';
+        h += `<div class="dp-before"><strong>Before:</strong><pre class="code-pre">${esc(item.original)}</pre></div>`;
+        h += `<div class="dp-after"><strong>After:</strong><pre class="code-pre">${esc(item.sanitized || "")}</pre></div>`;
+        h += '</div>';
+      }
+      h += '</details>';
+    }
+  }
+
+  h += '</div>';
+  safeHTML(el, h);
+
+  el.querySelectorAll(".dp-copy").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const code = btn.closest(".code-wrap").querySelector(".code-pre").textContent;
+      navigator.clipboard.writeText(code);
+      btn.textContent = "Copied!";
+      setTimeout(() => btn.textContent = "Copy", 1200);
+    });
+  });
+}
+
 function updatePolicyModeUI() {
   const title = $("#policy-title");
   const desc = $("#policy-mode-desc");
   if (policyMode === "perfect-types") {
     title.textContent = "Perfect Types Policy";
-    desc.innerHTML = 'Zero-policy approach: replaces <code>innerHTML</code> with <code>setHTML()</code> (Sanitizer API). ' +
+    safeHTML(desc, 'Zero-policy approach: replaces <code>innerHTML</code> with <code>setHTML()</code> (Sanitizer API). ' +
       'Blocks all legacy HTML sinks via <code>trusted-types \'none\'</code>. ' +
-      '<a href="#" id="pt-ref-link">Learn more</a>';
+      '<a href="#" id="pt-ref-link">Learn more</a>');
     $("#pt-ref-link")?.addEventListener("click", e => {
       e.preventDefault();
       chrome.tabs.create({ url: "https://frederikbraun.de/perfect-types-with-sethtml.html" });
     });
   } else {
     title.textContent = "Generated Default Policy";
-    desc.innerHTML = 'Generates a <code>default</code> Trusted Types policy with allowlists derived from observed violations.';
+    safeHTML(desc, 'Generates a <code>default</code> Trusted Types policy with DOMPurify differential analysis and allowlists derived from observed violations.');
   }
   $("#policy-output").textContent = '// Click "Generate" to create a policy from observed violations';
-  $("#policy-warnings").innerHTML = "";
+  safeClear($("#policy-warnings"));
+  lastDomPurifyDiff = null;
+  renderDomPurifyDiffSection(null);
   $("#btn-gen-policy").textContent = "Generate";
 }
 
@@ -598,38 +838,116 @@ function renderPolicyWarnings() {
     w.push({ l: "info", t: "Review and tighten before production. Consider named policies." });
   }
 
-  $("#policy-warnings").innerHTML = w.map(x => {
+  safeHTML($("#policy-warnings"), w.map(x => {
     const icon = x.l === "crit" ? "&#9888;" : x.l === "ok" ? "&#10003;" : x.l === "sethtml" ? "&#9889;" : "&#9432;";
     return `<div class="warn-item warn-${x.l}"><span>${icon}</span><span>${esc(x.t)}</span></div>`;
-  }).join("");
+  }).join(""));
 }
 
 // ── AI Assistant (multi-turn) ──
 
+const AI_PROVIDER_LABELS = { claude: "Claude", gemini: "Gemini", gpt: "GPT" };
+
+function effectiveAiProvider() {
+  if (aiProv === "auto") return window.AIAssistant?.detectProvider(aiKey) || null;
+  return aiProv;
+}
+
+function aiProviderDisplayName(resolved) {
+  return AI_PROVIDER_LABELS[resolved] || resolved || "AI";
+}
+
 function bindAI() {
   $("#ai-save").addEventListener("click", saveAIKey);
-  $("#ai-settings").addEventListener("click", () => { $("#ai-setup-panel").classList.remove("hidden"); $("#ai-chat-panel").classList.add("hidden"); });
+  $("#ai-settings").addEventListener("click", showAISettings);
   $("#ai-eye").addEventListener("click", () => { const i = $("#ai-key"); i.type = i.type === "password" ? "text" : "password"; });
   $("#ai-send").addEventListener("click", sendAI);
   $("#ai-input").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAI(); } });
   $$(".qbtn").forEach(b => b.addEventListener("click", () => { $("#ai-input").value = b.dataset.q; sendAI(); }));
+  $("#ai-model-save").addEventListener("click", applyModelChoice);
+  $("#ai-model-close").addEventListener("click", () => { $("#ai-model-bar").classList.add("hidden"); });
 }
 
 function saveAIKey() {
-  const k = $("#ai-key").value.trim(), p = $("#ai-provider").value;
+  const k = $("#ai-key").value.trim();
+  const p = $("#ai-provider").value;
   if (!k) { showAISt("Enter an API key.", "err"); return; }
-  aiKey = k; aiProv = p;
+  aiKey = k;
+  aiProv = p;
   safeSend({ action: "saveApiKeys", apiKeys: { key: k, provider: p } }, () => {
     showAISt("Saved!", "ok");
     setTimeout(showAIChat, 600);
   });
 }
 
+function showAISettings() {
+  if ($("#ai-model-bar").classList.contains("hidden")) {
+    openModelPicker();
+  } else {
+    $("#ai-setup-panel").classList.remove("hidden");
+    $("#ai-chat-panel").classList.add("hidden");
+  }
+}
+
+async function openModelPicker() {
+  const bar = $("#ai-model-bar");
+  const select = $("#ai-model");
+  bar.classList.remove("hidden");
+
+  const resolved = effectiveAiProvider();
+  if (!resolved || !aiKey) return;
+
+  safeClear(select);
+  const loading = document.createElement("option");
+  loading.value = "";
+  loading.textContent = "Loading models...";
+  select.appendChild(loading);
+
+  try {
+    const models = await window.AIAssistant.fetchModels(aiKey, resolved);
+    safeClear(select);
+    if (!models || models.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No models found";
+      select.appendChild(opt);
+      return;
+    }
+    for (const m of models) {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      opt.textContent = m.name || m.id;
+      select.appendChild(opt);
+    }
+    if (aiModel && models.some(m => m.id === aiModel)) {
+      select.value = aiModel;
+    }
+  } catch (err) {
+    safeClear(select);
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = `Error: ${err.message}`;
+    select.appendChild(opt);
+  }
+}
+
+function applyModelChoice() {
+  const m = $("#ai-model").value;
+  if (!m) return;
+  aiModel = m;
+  safeSend({ action: "saveApiKeys", apiKeys: { key: aiKey, provider: aiProv, model: m } });
+  const resolved = effectiveAiProvider();
+  const label = aiProviderDisplayName(resolved);
+  $("#ai-connected-label").textContent = `${label}: ${aiModel}`;
+  $("#ai-model-bar").classList.add("hidden");
+}
+
 function showAIChat() {
   $("#ai-setup-panel").classList.add("hidden");
   $("#ai-chat-panel").classList.remove("hidden");
-  const det = aiProv !== "auto" ? aiProv : (window.AIAssistant?.detectProvider(aiKey) || "AI");
-  $("#ai-connected-label").textContent = `Connected: ${{ claude: "Claude", gemini: "Gemini", gpt: "GPT" }[det] || det}`;
+  const resolved = effectiveAiProvider();
+  const label = aiProviderDisplayName(resolved);
+  $("#ai-connected-label").textContent = aiModel ? `${label}: ${aiModel}` : label;
 }
 
 function showAISt(msg, type) {
@@ -662,9 +980,9 @@ async function sendAI() {
   const tid = appendMsg("bot", "", true);
 
   try {
-    const prov = aiProv !== "auto" ? aiProv : undefined;
     const analysis = gatherAIAnalysis();
-    const resp = await window.AIAssistant.queryAIMultiTurn(aiKey, prov, violations, aiHistory, analysis);
+    const provArg = aiProv === "auto" ? undefined : aiProv;
+    const resp = await window.AIAssistant.queryAIMultiTurn(aiKey, provArg, violations, aiHistory, analysis, aiModel);
     removeMsg(tid);
     appendMsg("bot", resp);
     aiHistory.push({ role: "assistant", content: resp });
@@ -682,7 +1000,7 @@ function askAIAbout(v) {
   $$(".ptab-content").forEach(c => c.classList.remove("active"));
   $('[data-tab="ai"]').classList.add("active");
   $("#pt-ai").classList.add("active");
-  if (!aiKey) { showAISt("Configure API key first.", "info"); return; }
+  if (!aiKey) { showAISt("Configure an API key first.", "info"); return; }
   showAIChat();
   let q = `Analyze this violation:\nType: ${v.violationType}\nSource: ${v.sourceFile}:${v.lineNumber}`;
   if (v.sinkName && v.sinkName !== "Unknown sink") q += `\nSink: ${v.sinkName} (${v.sinkCategory || "unknown"})`;
@@ -698,7 +1016,7 @@ function appendMsg(role, text, thinking, isErr) {
   const el = document.createElement("div");
   el.className = `ai-msg ${role}${isErr ? " err" : ""}`;
   el.id = id;
-  el.innerHTML = thinking ? '<div class="dots"><span></span><span></span><span></span></div>' : fmtAI(text);
+  safeHTML(el, thinking ? '<div class="dots"><span></span><span></span><span></span></div>' : fmtAI(text));
   $("#ai-messages").appendChild(el);
   $("#ai-messages").scrollTop = $("#ai-messages").scrollHeight;
   return id;
@@ -706,30 +1024,34 @@ function appendMsg(role, text, thinking, isErr) {
 function removeMsg(id) { document.getElementById(id)?.remove(); }
 
 function fmtAI(text) {
-  // Extract code blocks BEFORE escaping so their contents stay raw
+  const PLACEHOLDER = "\x00CB";
   const codeBlocks = [];
-  let safe = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+  let working = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
     const idx = codeBlocks.length;
     codeBlocks.push(`<pre><code>${esc(code)}</code></pre>`);
-    return `%%CODEBLOCK_${idx}%%`;
+    return `${PLACEHOLDER}${idx}${PLACEHOLDER}`;
   });
 
-  // Now escape the non-code text
-  safe = esc(safe);
+  const inlineCode = [];
+  working = working.replace(/`([^`]+)`/g, (_, code) => {
+    const idx = inlineCode.length;
+    inlineCode.push(`<code>${esc(code)}</code>`);
+    return `\x00IC${idx}\x00IC`;
+  });
 
-  // Inline formatting
-  safe = safe.replace(/`([^`]+)`/g, "<code>$1</code>");
-  safe = safe.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-  safe = safe.replace(/^### (.+)$/gm, "<h4>$1</h4>");
-  safe = safe.replace(/^## (.+)$/gm, "<h3>$1</h3>");
-  safe = safe.replace(/^- (.+)$/gm, "<li>$1</li>");
-  safe = safe.replace(/^(\d+)\. (.+)$/gm, "<li>$2</li>");
-  safe = safe.replace(/\n\n/g, "</p><p>");
+  working = esc(working);
 
-  // Restore code blocks
-  safe = safe.replace(/%%CODEBLOCK_(\d+)%%/g, (_, i) => codeBlocks[+i]);
+  working = working.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  working = working.replace(/^### (.+)$/gm, "<h4>$1</h4>");
+  working = working.replace(/^## (.+)$/gm, "<h3>$1</h3>");
+  working = working.replace(/^- (.+)$/gm, "<li>$1</li>");
+  working = working.replace(/^(\d+)\. (.+)$/gm, "<li>$2</li>");
+  working = working.replace(/\n\n/g, "</p><p>");
 
-  return `<p>${safe}</p>`;
+  working = working.replace(/\x00IC(\d+)\x00IC/g, (_, i) => inlineCode[+i] || "");
+  working = working.replace(new RegExp(`${PLACEHOLDER}(\\d+)${PLACEHOLDER}`, "g"), (_, i) => codeBlocks[+i] || "");
+
+  return `<p>${working}</p>`;
 }
 
 // ── First-Party Aliases ──
@@ -795,6 +1117,10 @@ function reClassifyAndRefresh() {
   safeSend({ action: "getFullState", tabId: TAB_ID }, r => {
     if (!r) return;
     violations = r.violations || [];
+    if (r.dupCounts) {
+      dupCounts = new Map(Object.entries(r.dupCounts));
+    }
+    totalOccurrences = r.totalOccurrences || violations.length;
     renderLiveTable();
     updateStats();
   });
@@ -803,12 +1129,12 @@ function reClassifyAndRefresh() {
 function renderAliasTags() {
   const el = $("#alias-tags");
   if (firstPartyAliases.length === 0) {
-    el.innerHTML = '<span class="alias-empty">No aliases configured. Use Auto-Suggest or add manually.</span>';
+    safeHTML(el, '<span class="alias-empty">No aliases configured. Use Auto-Suggest or add manually.</span>');
     return;
   }
-  el.innerHTML = firstPartyAliases.map(a =>
+  safeHTML(el, firstPartyAliases.map(a =>
     `<span class="alias-tag">${esc(a)}<button class="alias-rm" data-host="${esc(a)}" title="Remove">&times;</button></span>`
-  ).join("");
+  ).join(""));
   el.querySelectorAll(".alias-rm").forEach(btn => {
     btn.addEventListener("click", () => removeAlias(btn.dataset.host));
   });
@@ -823,7 +1149,7 @@ function fetchAliasSuggestions() {
     btn.disabled = false;
     const el = $("#alias-suggestions");
     if (!r || !r.suggestions || r.suggestions.length === 0) {
-      el.innerHTML = '<div class="alias-no-suggestions">No suggestions — all third-party origins look genuinely external, or not enough violations captured yet.</div>';
+      safeHTML(el, '<div class="alias-no-suggestions">No suggestions — all third-party origins look genuinely external, or not enough violations captured yet.</div>');
       return;
     }
     let html = '<div class="alias-suggestion-list">';
@@ -840,7 +1166,7 @@ function fetchAliasSuggestions() {
       </div>`;
     }
     html += '</div>';
-    el.innerHTML = html;
+    safeHTML(el, html);
     el.querySelectorAll(".alias-sug-add").forEach(b => {
       b.addEventListener("click", () => {
         addSuggestedAlias(b.dataset.host);
@@ -893,18 +1219,18 @@ function loadInsights() {
 
 function renderOriginAnalysis() {
   if (!originAnalysis) {
-    $("#origin-summary").innerHTML = '<span class="ins-empty">No violations to analyze.</span>';
+    safeHTML($("#origin-summary"), '<span class="ins-empty">No violations to analyze.</span>');
     return;
   }
   const a = originAnalysis;
   const total = a.summary.total;
 
-  $("#origin-summary").innerHTML = `
+  safeHTML($("#origin-summary"), `
     <div class="origin-stats">
       <div class="ostat"><span class="ostat-num ostat-1p">${a.firstParty.count}</span><span class="ostat-lbl">First-party</span></div>
       <div class="ostat"><span class="ostat-num ostat-3p">${a.thirdParty.count}</span><span class="ostat-lbl">Third-party</span></div>
       <div class="ostat"><span class="ostat-num">${a.unknown.count}</span><span class="ostat-lbl">Unknown</span></div>
-    </div>`;
+    </div>`);
 
   if (total > 0) {
     let fpW = a.firstParty.count > 0 ? Math.max(1, a.summary.firstPartyPct) : 0;
@@ -918,12 +1244,12 @@ function renderOriginAnalysis() {
     let barSegs = "";
     if (a.firstParty.count > 0) barSegs += `<div class="obar-seg obar-1p" style="width:${fpW}%" title="First-party: ${a.firstParty.count}"></div>`;
     if (a.thirdParty.count > 0) barSegs += `<div class="obar-seg obar-3p" style="width:${tpW}%" title="Third-party: ${a.thirdParty.count}"></div>`;
-    $("#origin-bar").innerHTML = `
+    safeHTML($("#origin-bar"), `
       <div class="obar">${barSegs}</div>
       <div class="obar-legend">
         <span class="obar-label"><span class="obar-dot obar-1p-dot"></span> First-party ${a.summary.firstPartyPct}%</span>
         <span class="obar-label"><span class="obar-dot obar-3p-dot"></span> Third-party ${a.summary.thirdPartyPct}%</span>
-      </div>`;
+      </div>`);
   }
 
   let detailHtml = "";
@@ -935,13 +1261,13 @@ function renderOriginAnalysis() {
     }
     detailHtml += '</div><p class="ins-tip">Third-party violations need targeted named policies or library updates. Fix first-party code first.</p></div>';
   }
-  $("#origin-details").innerHTML = detailHtml;
+  safeHTML($("#origin-details"), detailHtml);
 }
 
 function renderSinkMap(sinkMap) {
   const el = $("#sink-map-content");
   if (!sinkMap || sinkMap.length === 0) {
-    el.innerHTML = '<span class="ins-empty">No violations to map.</span>';
+    safeHTML(el, '<span class="ins-empty">No violations to map.</span>');
     return;
   }
 
@@ -980,13 +1306,13 @@ function renderSinkMap(sinkMap) {
     html += '</div>';
   }
   html += '</div>';
-  el.innerHTML = html;
+  safeHTML(el, html);
 }
 
 function renderFrameworkInfo(frameworks, guidance) {
   const el = $("#framework-content");
   if (!frameworks || frameworks.length === 0) {
-    el.innerHTML = '<span class="ins-empty">No frameworks detected from violation data. This analysis improves as more violations are captured.</span>';
+    safeHTML(el, '<span class="ins-empty">No frameworks detected from violation data. This analysis improves as more violations are captured.</span>');
     return;
   }
 
@@ -1012,7 +1338,7 @@ function renderFrameworkInfo(frameworks, guidance) {
     html += '</div>';
   }
   html += '</div>';
-  el.innerHTML = html;
+  safeHTML(el, html);
 
   el.querySelectorAll(".fw-copy").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -1027,7 +1353,7 @@ function renderFrameworkInfo(frameworks, guidance) {
 function renderScatterAnalysis(scatter) {
   const el = $("#scatter-content");
   if (!scatter) {
-    el.innerHTML = '<span class="ins-empty">No scatter data available.</span>';
+    safeHTML(el, '<span class="ins-empty">No scatter data available.</span>');
     return;
   }
 
@@ -1068,7 +1394,7 @@ function renderScatterAnalysis(scatter) {
     html += '</div></div>';
   }
 
-  el.innerHTML = html;
+  safeHTML(el, html);
 
   el.querySelectorAll(".scatter-copy").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -1083,7 +1409,7 @@ function renderScatterAnalysis(scatter) {
 function renderNamedPolicies(result) {
   const el = $("#named-policies-content");
   if (!result || result.policies.length === 0) {
-    el.innerHTML = '<span class="ins-empty">No violations available to generate policy recommendations. Capture violations first.</span>';
+    safeHTML(el, '<span class="ins-empty">No violations available to generate policy recommendations. Capture violations first.</span>');
     return;
   }
 
@@ -1114,7 +1440,7 @@ function renderNamedPolicies(result) {
     </div>`;
   }
 
-  el.innerHTML = html;
+  safeHTML(el, html);
 
   el.querySelectorAll(".np-copy, .np-copy-module").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -1129,7 +1455,7 @@ function renderNamedPolicies(result) {
 function renderCspHeader(csp) {
   const el = $("#csp-content");
   if (!csp) {
-    el.innerHTML = '<span class="ins-empty">No CSP data available.</span>';
+    safeHTML(el, '<span class="ins-empty">No CSP data available.</span>');
     return;
   }
 
@@ -1153,7 +1479,7 @@ function renderCspHeader(csp) {
   }
   html += '</div>';
 
-  el.innerHTML = html;
+  safeHTML(el, html);
 
   el.querySelectorAll(".csp-copy").forEach(btn => {
     btn.addEventListener("click", () => {
@@ -1169,7 +1495,29 @@ function renderCspHeader(csp) {
 
 function exportData() {
   if (violations.length === 0) return;
-  const data = { exported: new Date().toISOString(), tabId: TAB_ID, violations, clusters: clusters.map(c => ({ ...c, violations: undefined })) };
+  const clusterSummaries = clusters.map(c => {
+    const { violations: clusterViolations, ...rest } = c;
+    return {
+      ...rest,
+      violationIndices: (clusterViolations || []).map(cv => {
+        const idx = violations.indexOf(cv);
+        return idx >= 0 ? idx : null;
+      }).filter(i => i !== null)
+    };
+  });
+  const occurrenceCounts = {};
+  for (const v of violations) {
+    if (v.hash) occurrenceCounts[v.hash] = dupCounts.get(v.hash) || 1;
+  }
+  const data = {
+    exported: new Date().toISOString(),
+    tabId: TAB_ID,
+    uniqueViolations: violations.length,
+    totalOccurrences,
+    violations,
+    occurrenceCounts,
+    clusters: clusterSummaries
+  };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

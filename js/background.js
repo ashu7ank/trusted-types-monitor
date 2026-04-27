@@ -1,15 +1,28 @@
 // Background service worker for Trusted Types Monitor
 const MAX_STORAGE_ITEMS = 1000;
-const DEDUP_WINDOW_MS = 2000;
+const MAX_DEDUP_ENTRIES = 1000;
+const FLUSH_ALARM_NAME = "tt-flush-pending";
+const FLUSH_ALARM_PERIOD_MIN = 0.25;
 
 let pendingReports = [];
 let recentHashes = new Map();
-let monitoringEnabled = true;
-let storeInFlight = false;
-const recentlyClearedTabs = new Set();
+let tabClusters = new Map();
+let tabUniqueCounts = new Map();
+let tabTotalCounts = new Map();
+let monitoringEnabled = false;
 let firstPartyAliases = [];
-let aliasesReady = false;
+let initReady = false;
 let pendingViolationQueue = [];
+
+// ── Serialized Storage Queue ──
+// All writes to the "violations" key are funneled through this queue
+// so concurrent get+set cycles never clobber each other.
+let storageQueue = Promise.resolve();
+
+function enqueueStorageOp(fn) {
+  storageQueue = storageQueue.then(fn, fn);
+  return storageQueue;
+}
 
 // ── Deduplication ──
 
@@ -17,30 +30,37 @@ function violationHash(v) {
   return `${v.tabId}|${v.url}|${v.sourceFile}|${v.lineNumber}|${v.directive}|${(v.sample || "").substring(0, 80)}`;
 }
 
-function isDuplicate(violation) {
-  const hash = violationHash(violation);
+function checkDuplicate(hash) {
   const now = Date.now();
-  const prev = recentHashes.get(hash);
-  if (prev && (now - prev) < DEDUP_WINDOW_MS) return true;
-  recentHashes.set(hash, now);
-  if (recentHashes.size > 500) {
-    const cutoff = now - DEDUP_WINDOW_MS * 2;
-    for (const [k, t] of recentHashes) {
-      if (t < cutoff) recentHashes.delete(k);
+  const entry = recentHashes.get(hash);
+  if (entry) {
+    entry.count++;
+    entry.lastSeen = now;
+    return { isDup: true, count: entry.count };
+  }
+  recentHashes.set(hash, { count: 1, firstSeen: now, lastSeen: now });
+  if (recentHashes.size > MAX_DEDUP_ENTRIES) {
+    const cutoff = now - 60000;
+    for (const [k, v] of recentHashes) {
+      if (v.lastSeen < cutoff) recentHashes.delete(k);
+    }
+    if (recentHashes.size > MAX_DEDUP_ENTRIES) {
+      const entries = [...recentHashes.entries()].sort((a, b) => a[1].lastSeen - b[1].lastSeen);
+      const excess = entries.length - MAX_DEDUP_ENTRIES;
+      for (let i = 0; i < excess; i++) recentHashes.delete(entries[i][0]);
     }
   }
-  return false;
+  return { isDup: false, count: 1 };
 }
 
 // ── Violation Processing ──
 
 function processViolation(violation, tabId) {
-  if (!monitoringEnabled) return;
-
-  if (!aliasesReady) {
+  if (!initReady) {
     pendingViolationQueue.push({ violation, tabId });
     return;
   }
+  if (!monitoringEnabled) return;
 
   const normalized = {
     timestamp: violation.timestamp || new Date().toISOString(),
@@ -66,11 +86,23 @@ function processViolation(violation, tabId) {
   normalized.party = originClass.party;
   normalized.sourceOrigin = originClass.sourceOrigin;
 
-  if (isDuplicate(normalized)) return;
+  normalized.hash = violationHash(normalized);
+  tabTotalCounts.set(tabId, (tabTotalCounts.get(tabId) || 0) + 1);
 
+  const dupResult = checkDuplicate(normalized.hash);
+  if (dupResult.isDup) {
+    for (const [port, portTabId] of panelPorts.entries()) {
+      if (portTabId === tabId && tabId > 0) {
+        try { port.postMessage({ action: "dupCountUpdated", hash: normalized.hash, count: dupResult.count }); } catch {}
+      }
+    }
+    return;
+  }
+
+  tabUniqueCounts.set(tabId, (tabUniqueCounts.get(tabId) || 0) + 1);
   pendingReports.push(normalized);
+  addToCluster(normalized);
 
-  // Push ONLY to the DevTools panel watching this specific tab
   for (const [port, portTabId] of panelPorts.entries()) {
     if (portTabId === tabId && tabId > 0) {
       try { port.postMessage({ action: "newViolation", violation: normalized }); } catch {}
@@ -182,14 +214,17 @@ function inferViolationType(violation) {
 // ── Badge ──
 
 function updateBadge(tabId) {
+  if (tabId <= 0) return;
+  const count = tabUniqueCounts.get(tabId);
+  if (count !== undefined) {
+    chrome.action.setBadgeText({ text: count > 0 ? String(count) : "", tabId });
+    chrome.action.setBadgeBackgroundColor({ color: "#ef4444", tabId });
+    return;
+  }
   chrome.storage.local.get(["violations"], (result) => {
-    const all = [...(result.violations || []), ...pendingReports];
-
-    if (tabId > 0) {
-      const tabCount = all.filter(v => v.tabId === tabId).length;
-      chrome.action.setBadgeText({ text: tabCount > 0 ? String(tabCount) : "", tabId });
-      chrome.action.setBadgeBackgroundColor({ color: "#ef4444", tabId });
-    }
+    const tabCount = (result.violations || []).filter(v => v.tabId === tabId).length;
+    chrome.action.setBadgeText({ text: tabCount > 0 ? String(tabCount) : "", tabId });
+    chrome.action.setBadgeBackgroundColor({ color: "#ef4444", tabId });
   });
 }
 
@@ -254,6 +289,55 @@ function extractRootFrame(stackTrace) {
   return null;
 }
 
+// ── Incremental Cluster Management ──
+
+function addToCluster(violation) {
+  const tabId = violation.tabId;
+  if (!tabClusters.has(tabId)) tabClusters.set(tabId, new Map());
+  const clusters = tabClusters.get(tabId);
+  const rootCause = computeRootCause(violation);
+  const key = rootCause + "|" + violation.violationType;
+
+  if (clusters.has(key)) {
+    const c = clusters.get(key);
+    c.count++;
+    c.violations.push(violation);
+    if (violation.timestamp > c.lastSeen) c.lastSeen = violation.timestamp;
+    if (violation.timestamp < c.firstSeen) c.firstSeen = violation.timestamp;
+  } else {
+    clusters.set(key, {
+      id: key,
+      rootCause,
+      violationType: violation.violationType,
+      sourceFile: violation.sourceFile,
+      lineNumber: violation.lineNumber,
+      columnNumber: violation.columnNumber,
+      samplePreview: (violation.sample || "").substring(0, 120),
+      count: 1,
+      firstSeen: violation.timestamp,
+      lastSeen: violation.timestamp,
+      violations: [violation]
+    });
+  }
+}
+
+function getTabClustersSorted(tabId) {
+  const clusterMap = tabClusters.get(tabId);
+  if (!clusterMap) return [];
+  return [...clusterMap.values()].sort((a, b) => b.count - a.count);
+}
+
+function clearTabClusters(tabId) {
+  tabClusters.delete(tabId);
+}
+
+function ensureTabClusters(tabId, violations) {
+  if (tabClusters.has(tabId)) return;
+  for (const v of violations) {
+    addToCluster(v);
+  }
+}
+
 // ── Policy Generation ──
 
 function generatePolicy(violations) {
@@ -301,10 +385,205 @@ function analyzeHtmlSamples(samples) {
   return { tags: [...tags], attrs: [...attrs], rawFragments, totalSamples: samples.length };
 }
 
-function buildPolicyCode(htmlAnalysis, scriptList, urlList) {
+// ── DOMPurify Differential Analysis ──
+// Sends HTML samples to the content script (which has DOM + DOMPurify) and
+// compares before/after to determine what DOMPurify strips.
+
+function extractTagsAndAttrs(html) {
+  const tags = new Set();
+  const attrs = new Set();
+  const tagAttrPairs = new Set();
+
+  const tagRe = /<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g;
+  let m;
+  while ((m = tagRe.exec(html)) !== null) {
+    const tag = m[1].toLowerCase();
+    tags.add(tag);
+    const attrStr = m[2];
+    const attrRe = /\s([a-zA-Z][a-zA-Z0-9_-]*)\s*(?:=|(?=\s|$))/g;
+    let am;
+    while ((am = attrRe.exec(attrStr)) !== null) {
+      const attr = am[1].toLowerCase();
+      attrs.add(attr);
+      tagAttrPairs.add(`${tag}:${attr}`);
+    }
+  }
+  return { tags: [...tags], attrs: [...attrs], tagAttrPairs: [...tagAttrPairs] };
+}
+
+function computeDomPurifyDiff(original, sanitized) {
+  const before = extractTagsAndAttrs(original);
+  const after = extractTagsAndAttrs(sanitized);
+  const afterTags = new Set(after.tags);
+  const afterAttrs = new Set(after.attrs);
+  const afterPairs = new Set(after.tagAttrPairs);
+
+  const strippedTags = before.tags.filter(t => !afterTags.has(t));
+  const strippedAttrs = before.attrs.filter(a => !afterAttrs.has(a));
+  const strippedPairs = before.tagAttrPairs.filter(p => !afterPairs.has(p));
+  const survivedTags = before.tags.filter(t => afterTags.has(t));
+  const survivedAttrs = before.attrs.filter(a => afterAttrs.has(a));
+
+  const contentChanged = original.trim() !== sanitized.trim();
+
+  return {
+    strippedTags,
+    strippedAttrs,
+    strippedPairs,
+    survivedTags,
+    survivedAttrs,
+    contentChanged,
+    originalLength: original.length,
+    sanitizedLength: sanitized.length
+  };
+}
+
+function requestSanitization(tabId, html) {
+  return new Promise((resolve) => {
+    if (!tabId || tabId <= 0) {
+      resolve({ sanitized: "", error: "No active tab" });
+      return;
+    }
+    try {
+      chrome.tabs.sendMessage(tabId, { action: "sanitizeHTML", html }, (response) => {
+        if (chrome.runtime.lastError || !response) {
+          resolve({ sanitized: "", error: chrome.runtime.lastError?.message || "No response" });
+          return;
+        }
+        resolve(response);
+      });
+    } catch (e) {
+      resolve({ sanitized: "", error: e.message });
+    }
+  });
+}
+
+async function performDomPurifyAnalysis(tabId, violations) {
+  const htmlViolations = violations.filter(v =>
+    (v.violationType || inferViolationType(v)) === "TrustedHTML"
+  );
+
+  if (htmlViolations.length === 0) {
+    return { samples: [], summary: null };
+  }
+
+  const seen = new Set();
+  const uniqueSamples = [];
+  for (const v of htmlViolations) {
+    const s = v.sample || "";
+    if (!s || s === "unknown" || !/<[a-zA-Z]/.test(s)) continue;
+    const key = s.substring(0, 200);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueSamples.push({ sample: s, violation: v });
+    if (uniqueSamples.length >= 30) break;
+  }
+
+  if (uniqueSamples.length === 0) {
+    return { samples: [], summary: null };
+  }
+
+  const results = [];
+  const allStrippedTags = new Set();
+  const allStrippedAttrs = new Set();
+  const allSurvivedTags = new Set();
+  const allSurvivedAttrs = new Set();
+  let totalChanged = 0;
+
+  for (const item of uniqueSamples) {
+    const resp = await requestSanitization(tabId, item.sample);
+    if (resp.error) {
+      results.push({
+        original: item.sample.substring(0, 300),
+        sanitized: null,
+        error: resp.error,
+        diff: null
+      });
+      continue;
+    }
+
+    const diff = computeDomPurifyDiff(item.sample, resp.sanitized);
+    diff.strippedTags.forEach(t => allStrippedTags.add(t));
+    diff.strippedAttrs.forEach(a => allStrippedAttrs.add(a));
+    diff.survivedTags.forEach(t => allSurvivedTags.add(t));
+    diff.survivedAttrs.forEach(a => allSurvivedAttrs.add(a));
+    if (diff.contentChanged) totalChanged++;
+
+    results.push({
+      original: item.sample.substring(0, 300),
+      sanitized: resp.sanitized.substring(0, 300),
+      diff
+    });
+  }
+
+  const summary = {
+    totalSamples: uniqueSamples.length,
+    samplesChanged: totalChanged,
+    samplesUnchanged: uniqueSamples.length - totalChanged,
+    strippedTags: [...allStrippedTags],
+    strippedAttrs: [...allStrippedAttrs],
+    survivedTags: [...allSurvivedTags],
+    survivedAttrs: [...allSurvivedAttrs],
+    recommendation: ""
+  };
+
+  if (totalChanged === 0) {
+    summary.recommendation = "All HTML samples pass DOMPurify unchanged. " +
+      "DOMPurify.sanitize(input) can be used as the createHTML implementation with no functional impact.";
+  } else if (totalChanged === uniqueSamples.length) {
+    summary.recommendation = "DOMPurify modifies every HTML sample. " +
+      "Review the stripped elements/attributes below. If they are needed, " +
+      "configure DOMPurify allowlists (ADD_TAGS/ADD_ATTR). If not, DOMPurify.sanitize() is the correct policy.";
+  } else {
+    summary.recommendation = `DOMPurify modifies ${totalChanged} of ${uniqueSamples.length} HTML samples. ` +
+      "Consider splitting into a strict policy (plain sanitize) for safe HTML and " +
+      "a permissive policy (with ADD_TAGS/ADD_ATTR) for content that needs the stripped elements.";
+  }
+
+  if (allStrippedTags.size > 0) {
+    const dangerousTags = [...allStrippedTags].filter(t =>
+      ["script", "iframe", "object", "embed", "applet", "form", "base"].includes(t)
+    );
+    const safeTags = [...allStrippedTags].filter(t =>
+      !["script", "iframe", "object", "embed", "applet", "form", "base"].includes(t)
+    );
+    if (dangerousTags.length > 0) {
+      summary.recommendation += `\n\nDANGEROUS stripped tags (do NOT allowlist): ${dangerousTags.join(", ")}`;
+    }
+    if (safeTags.length > 0) {
+      summary.recommendation += `\n\nPotentially safe stripped tags (review before allowlisting): ${safeTags.join(", ")}`;
+      summary.allowlistSuggestion = {
+        ADD_TAGS: safeTags,
+        ADD_ATTR: [...allStrippedAttrs].filter(a => !a.startsWith("on"))
+      };
+    }
+  }
+
+  return { samples: results, summary };
+}
+
+function buildPolicyCode(htmlAnalysis, scriptList, urlList, domPurifyDiff) {
   const l = [];
   l.push("// Auto-generated Trusted Types default policy");
   l.push("// Review and tighten before deploying to production\n");
+
+  if (domPurifyDiff && domPurifyDiff.summary) {
+    const s = domPurifyDiff.summary;
+    l.push("// ── DOMPurify Differential Analysis ──");
+    l.push(`// Tested ${s.totalSamples} HTML sample(s) against DOMPurify:`);
+    l.push(`//   ${s.samplesUnchanged} passed unchanged, ${s.samplesChanged} were modified`);
+    if (s.strippedTags.length > 0) {
+      l.push("//   Stripped tags: " + s.strippedTags.join(", "));
+    }
+    if (s.strippedAttrs.length > 0) {
+      l.push("//   Stripped attributes: " + s.strippedAttrs.join(", "));
+    }
+    if (s.survivedTags.length > 0) {
+      l.push("//   Survived tags: " + s.survivedTags.join(", "));
+    }
+    l.push("");
+  }
+
   if (urlList.length > 0) {
     l.push("const urlAllowlist = [");
     urlList.forEach(u => l.push(`  "${u}",`));
@@ -318,15 +597,39 @@ function buildPolicyCode(htmlAnalysis, scriptList, urlList) {
   l.push("if (window.trustedTypes && trustedTypes.createPolicy) {");
   l.push("  trustedTypes.createPolicy('default', {");
   l.push("    createHTML: (input) => {");
-  if (htmlAnalysis.tags.length > 0) {
+
+  if (domPurifyDiff && domPurifyDiff.summary) {
+    const ds = domPurifyDiff.summary;
+    if (ds.samplesChanged === 0 && htmlAnalysis.totalSamples > 0) {
+      l.push("      // DOMPurify analysis: all samples pass unchanged — safe to sanitize");
+      l.push("      return DOMPurify.sanitize(input);");
+    } else if (ds.allowlistSuggestion) {
+      l.push("      // DOMPurify analysis: some content requires allowlisting");
+      l.push("      return DOMPurify.sanitize(input, {");
+      if (ds.allowlistSuggestion.ADD_TAGS.length > 0) {
+        l.push("        ADD_TAGS: [" + ds.allowlistSuggestion.ADD_TAGS.map(t => `'${t}'`).join(", ") + "],");
+      }
+      if (ds.allowlistSuggestion.ADD_ATTR.length > 0) {
+        l.push("        ADD_ATTR: [" + ds.allowlistSuggestion.ADD_ATTR.map(a => `'${a}'`).join(", ") + "],");
+      }
+      l.push("      });");
+    } else {
+      l.push("      // DOMPurify analysis: dangerous elements detected — use strict sanitization");
+      l.push("      return DOMPurify.sanitize(input);");
+    }
+  } else if (htmlAnalysis.tags.length > 0) {
     l.push("      // Detected tags: " + htmlAnalysis.tags.join(", "));
     l.push("      // Consider: DOMPurify.sanitize(input, {");
     if (htmlAnalysis.tags.length) l.push("      //   ADD_TAGS: [" + htmlAnalysis.tags.map(t => `'${t}'`).join(", ") + "],");
     if (htmlAnalysis.attrs.length) l.push("      //   ADD_ATTR: [" + htmlAnalysis.attrs.map(a => `'${a}'`).join(", ") + "],");
     l.push("      // })");
+    l.push("      // WARNING: Returning raw input is insecure. Use a sanitizer.");
+    l.push("      return input;");
+  } else {
+    l.push("      // WARNING: Returning raw input is insecure. Use a sanitizer.");
+    l.push("      return input;");
   }
-  l.push("      // WARNING: Returning raw input is insecure. Use a sanitizer.");
-  l.push("      return input;");
+
   l.push("    },\n");
   l.push("    createScriptURL: (input) => {");
   if (urlList.length > 0) {
@@ -810,14 +1113,35 @@ function classifyOrigin(violation) {
   const pageUrl = violation.url || "";
   const sourceFile = violation.sourceFile || "";
 
-  if (!sourceFile || sourceFile === "unknown" || !pageUrl) {
+  if (!sourceFile || sourceFile === "unknown") {
+    if (pageUrl) {
+      try {
+        const po = new URL(pageUrl).origin;
+        return { party: "first-party", pageOrigin: po, sourceOrigin: "inline" };
+      } catch {}
+    }
+    return { party: "unknown", pageOrigin: "", sourceOrigin: "" };
+  }
+  if (!pageUrl) {
     return { party: "unknown", pageOrigin: "", sourceOrigin: "" };
   }
 
   try {
     const pageOrigin = new URL(pageUrl).origin;
-    const sourceOrigin = new URL(sourceFile).origin;
-    const sourceHost = new URL(sourceFile).hostname;
+
+    if (sourceFile.startsWith("inline") || sourceFile.startsWith("eval")) {
+      return { party: "first-party", pageOrigin, sourceOrigin: "inline" };
+    }
+
+    let srcUrl;
+    try {
+      srcUrl = new URL(sourceFile);
+    } catch {
+      return { party: "unknown", pageOrigin, sourceOrigin: sourceFile };
+    }
+
+    const sourceOrigin = srcUrl.origin;
+    const sourceHost = srcUrl.hostname;
 
     if (pageOrigin === sourceOrigin) {
       return { party: "first-party", pageOrigin, sourceOrigin };
@@ -829,9 +1153,6 @@ function classifyOrigin(violation) {
 
     return { party: "third-party", pageOrigin, sourceOrigin };
   } catch {
-    if (sourceFile.startsWith("inline") || sourceFile.startsWith("eval")) {
-      return { party: "first-party", pageOrigin: "", sourceOrigin: "inline" };
-    }
     return { party: "unknown", pageOrigin: "", sourceOrigin: "" };
   }
 }
@@ -1230,37 +1551,30 @@ function buildGenericGuidance(g) {
   return g;
 }
 
-// ── Storage (with lock to prevent read-modify-write race) ──
+// ── Storage (serialized queue prevents read-modify-write races) ──
 
 function storeViolations() {
   if (pendingReports.length === 0) return;
-  if (storeInFlight) return;
-  storeInFlight = true;
 
   const batch = [...pendingReports];
   pendingReports = [];
 
-  chrome.storage.local.get(["violations"], (result) => {
-    // Drop any batch items whose tab was cleared while this write was in-flight
-    const safeBatch = recentlyClearedTabs.size > 0
-      ? batch.filter(v => !recentlyClearedTabs.has(v.tabId))
-      : batch;
-    recentlyClearedTabs.clear();
+  enqueueStorageOp(() => new Promise(resolve => {
+    chrome.storage.local.get(["violations"], (result) => {
+      let violations = [...(result.violations || []), ...batch];
+      if (violations.length > MAX_STORAGE_ITEMS) {
+        violations = violations.slice(violations.length - MAX_STORAGE_ITEMS);
+      }
 
-    let violations = [...(result.violations || []), ...safeBatch];
-    if (violations.length > MAX_STORAGE_ITEMS) {
-      violations = violations.slice(violations.length - MAX_STORAGE_ITEMS);
-    }
-
-    chrome.storage.local.set({ violations }, () => {
-      storeInFlight = false;
-      chrome.runtime.sendMessage({ action: "violationsUpdated", count: violations.length }).catch(() => {});
-      const tabIds = new Set(safeBatch.map(v => v.tabId).filter(id => id > 0));
-      tabIds.forEach(id => updateBadge(id));
-
-      if (pendingReports.length > 0) storeViolations();
+      chrome.storage.local.set({ violations }, () => {
+        chrome.runtime.sendMessage({ action: "violationsUpdated", count: violations.length }).catch(() => {});
+        const tabIds = new Set(batch.map(v => v.tabId).filter(id => id > 0));
+        tabIds.forEach(id => updateBadge(id));
+        resolve();
+        if (pendingReports.length > 0) storeViolations();
+      });
     });
-  });
+  }));
 }
 
 // ── Long-lived panel connections ──
@@ -1282,6 +1596,13 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // ── Helpers for message handlers ──
 
+function mergeWithPending(storedViolations) {
+  if (pendingReports.length === 0) return storedViolations;
+  const storedHashes = new Set(storedViolations.map(v => v.hash).filter(Boolean));
+  const novel = pendingReports.filter(v => !v.hash || !storedHashes.has(v.hash));
+  return novel.length > 0 ? [...storedViolations, ...novel] : storedViolations;
+}
+
 function getTabViolations(allViolations, tabId) {
   if (tabId > 0) return allViolations.filter(v => v.tabId === tabId);
   return allViolations;
@@ -1300,19 +1621,39 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case "getFullState": {
       const reqTab = request.tabId || -1;
-      chrome.storage.local.get(["violations", "aiApiKeys"], (result) => {
-        const allViolations = result.violations || [];
+      chrome.storage.local.get(["violations"], (localResult) => {
+        const stored = localResult.violations || [];
+        const allViolations = mergeWithPending(stored);
         const tabViolations = getTabViolations(allViolations, reqTab);
         reclassifyParty(tabViolations);
-        sendResponse({
-          violations: tabViolations,
-          clusters: clusterViolations(tabViolations),
-          apiKeys: result.aiApiKeys || {},
-          enabled: monitoringEnabled,
-          originAnalysis: classifyAllViolations(tabViolations),
-          frameworks: detectFrameworks(tabViolations),
-          scatter: analyzeScatter(tabViolations),
-          firstPartyAliases: firstPartyAliases
+        for (const v of tabViolations) { if (!v.hash) v.hash = violationHash(v); }
+        ensureTabClusters(reqTab, tabViolations);
+        const tabDupCounts = {};
+        let computedTotal = 0;
+        for (const v of tabViolations) {
+          const entry = recentHashes.get(v.hash);
+          const c = entry ? entry.count : 1;
+          tabDupCounts[v.hash] = c;
+          computedTotal += c;
+        }
+        let totalOcc = tabTotalCounts.get(reqTab) || 0;
+        if (totalOcc < computedTotal) totalOcc = computedTotal;
+        if (totalOcc < tabViolations.length) totalOcc = tabViolations.length;
+        const sessionStore = chrome.storage.session || chrome.storage.local;
+        sessionStore.get(["aiApiKeys"], (sessResult) => {
+          sendResponse({
+            violations: tabViolations,
+            clusters: getTabClustersSorted(reqTab),
+            dupCounts: tabDupCounts,
+            totalOccurrences: totalOcc,
+            apiKeyConfigured: !!(sessResult.aiApiKeys && sessResult.aiApiKeys.key),
+            apiKeys: sessResult.aiApiKeys || {},
+            enabled: monitoringEnabled,
+            originAnalysis: classifyAllViolations(tabViolations),
+            frameworks: detectFrameworks(tabViolations),
+            scatter: analyzeScatter(tabViolations),
+            firstPartyAliases: firstPartyAliases
+          });
         });
       });
       return true;
@@ -1321,8 +1662,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     case "getViolations": {
       const reqTab = request.tabId || -1;
       chrome.storage.local.get(["violations"], (result) => {
-        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        const tabViolations = getTabViolations(mergeWithPending(result.violations || []), reqTab);
         reclassifyParty(tabViolations);
+        for (const v of tabViolations) { if (!v.hash) v.hash = violationHash(v); }
         sendResponse({ violations: tabViolations });
       });
       return true;
@@ -1330,10 +1672,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     case "getClusters": {
       const reqTab = request.tabId || -1;
-      chrome.storage.local.get(["violations"], (result) => {
-        const tabViolations = getTabViolations(result.violations || [], reqTab);
-        sendResponse({ clusters: clusterViolations(tabViolations) });
-      });
+      if (tabClusters.has(reqTab)) {
+        sendResponse({ clusters: getTabClustersSorted(reqTab) });
+      } else {
+        chrome.storage.local.get(["violations"], (result) => {
+          const tabViolations = getTabViolations(result.violations || [], reqTab);
+          ensureTabClusters(reqTab, tabViolations);
+          sendResponse({ clusters: getTabClustersSorted(reqTab) });
+        });
+      }
       return true;
     }
 
@@ -1351,12 +1698,53 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     case "generatePolicy": {
       const reqTab = request.tabId || -1;
       const mode = request.mode || "standard";
+      const domPurifyDiff = request.domPurifyDiff || null;
       chrome.storage.local.get(["violations"], (result) => {
         const tabViolations = getTabViolations(result.violations || [], reqTab);
-        const policy = mode === "perfect-types"
-          ? generatePerfectTypesPolicy(tabViolations)
-          : generatePolicy(tabViolations);
-        sendResponse({ policy });
+        if (mode === "perfect-types") {
+          sendResponse({ policy: generatePerfectTypesPolicy(tabViolations) });
+        } else {
+          const htmlSamples = new Set();
+          const scriptSamples = new Set();
+          const urlPatterns = new Set();
+          for (const v of tabViolations) {
+            const type = v.violationType || inferViolationType(v);
+            const sample = v.sample || "";
+            if (sample === "unknown") continue;
+            switch (type) {
+              case "TrustedHTML": htmlSamples.add(sample); break;
+              case "TrustedScript": scriptSamples.add(sample); break;
+              case "TrustedScriptURL": {
+                const urlStr = v.blockedUri !== "unknown" ? v.blockedUri : sample;
+                if (urlStr && urlStr !== "unknown") {
+                  try { urlPatterns.add(new URL(urlStr).origin); }
+                  catch { urlPatterns.add(urlStr); }
+                }
+                break;
+              }
+            }
+          }
+          const policy = buildPolicyCode(
+            analyzeHtmlSamples([...htmlSamples]),
+            [...scriptSamples],
+            [...urlPatterns],
+            domPurifyDiff
+          );
+          sendResponse({ policy });
+        }
+      });
+      return true;
+    }
+
+    case "getDomPurifyAnalysis": {
+      const reqTab = request.tabId || -1;
+      chrome.storage.local.get(["violations"], (result) => {
+        const tabViolations = getTabViolations(result.violations || [], reqTab);
+        performDomPurifyAnalysis(reqTab, tabViolations).then(analysis => {
+          sendResponse({ analysis });
+        }).catch(e => {
+          sendResponse({ analysis: null, error: e.message });
+        });
       });
       return true;
     }
@@ -1427,44 +1815,88 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     case "clearViolations": {
       const reqTab = request.tabId || -1;
       if (reqTab > 0) {
-        recentlyClearedTabs.add(reqTab);
         pendingReports = pendingReports.filter(v => v.tabId !== reqTab);
         for (const [hash] of recentHashes) {
           if (hash.startsWith(`${reqTab}|`)) recentHashes.delete(hash);
         }
-        chrome.storage.local.get(["violations"], (result) => {
-          const kept = (result.violations || []).filter(v => v.tabId !== reqTab);
-          chrome.storage.local.set({ violations: kept }, () => {
-            sendResponse({ success: true });
-            updateBadge(reqTab);
+        clearTabClusters(reqTab);
+        tabUniqueCounts.delete(reqTab);
+        tabTotalCounts.delete(reqTab);
+        enqueueStorageOp(() => new Promise(resolve => {
+          chrome.storage.local.get(["violations"], (result) => {
+            const kept = (result.violations || []).filter(v => v.tabId !== reqTab);
+            chrome.storage.local.set({ violations: kept }, () => {
+              sendResponse({ success: true });
+              updateBadge(reqTab);
+              for (const [port, portTabId] of panelPorts.entries()) {
+                if (portTabId === reqTab) {
+                  try { port.postMessage({ action: "navigationReset" }); } catch {}
+                }
+              }
+              resolve();
+            });
           });
-        });
+        }));
       } else {
         pendingReports = [];
         recentHashes.clear();
-        chrome.storage.local.set({ violations: [] }, () => {
-          sendResponse({ success: true });
-          chrome.action.setBadgeText({ text: "" });
-        });
+        tabClusters.clear();
+        tabUniqueCounts.clear();
+        tabTotalCounts.clear();
+        enqueueStorageOp(() => new Promise(resolve => {
+          chrome.storage.local.set({ violations: [] }, () => {
+            sendResponse({ success: true });
+            chrome.action.setBadgeText({ text: "" });
+            for (const [port] of panelPorts.entries()) {
+              try { port.postMessage({ action: "navigationReset" }); } catch {}
+            }
+            resolve();
+          });
+        }));
       }
       return true;
     }
 
-    case "getApiKeys":
-      chrome.storage.local.get(["aiApiKeys"], (result) => {
+    case "getApiKeys": {
+      const sessionStore = chrome.storage.session || chrome.storage.local;
+      sessionStore.get(["aiApiKeys"], (result) => {
         sendResponse({ apiKeys: result.aiApiKeys || {} });
       });
       return true;
+    }
 
-    case "saveApiKeys":
-      chrome.storage.local.set({ aiApiKeys: request.apiKeys }, () => {
+    case "saveApiKeys": {
+      const sessionStore = chrome.storage.session || chrome.storage.local;
+      sessionStore.set({ aiApiKeys: request.apiKeys }, () => {
         sendResponse({ success: true });
       });
       return true;
+    }
 
     case "setEnabled":
       monitoringEnabled = request.enabled;
       chrome.storage.local.set({ monitoringEnabled: request.enabled });
+
+      for (const [port] of panelPorts.entries()) {
+        try {
+          port.postMessage({ action: "monitoringToggled", enabled: request.enabled });
+        } catch {}
+      }
+
+      if (!request.enabled) {
+        pendingReports = [];
+        recentHashes.clear();
+        tabClusters.clear();
+        tabUniqueCounts.clear();
+        tabTotalCounts.clear();
+        enqueueStorageOp(() => new Promise(resolve => {
+          chrome.storage.local.set({ violations: [] }, () => {
+            chrome.action.setBadgeText({ text: "" });
+            resolve();
+          });
+        }));
+      }
+
       sendResponse({ success: true, enabled: monitoringEnabled });
       return true;
 
@@ -1495,7 +1927,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 // ── Track current URL per tab & auto-clear on navigation ──
 
-const tabCurrentUrl = new Map(); // tabId -> current page URL
+let tabCurrentUrl = new Map();
+
+function persistTabUrls() {
+  const sessionStore = chrome.storage.session || chrome.storage.local;
+  sessionStore.set({ tabCurrentUrl: Object.fromEntries(tabCurrentUrl) });
+}
+
+const FULL_NAV_TYPES = new Set(["reload", "typed", "link", "auto_bookmark", "generated", "keyword", "keyword_generated"]);
 
 chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId !== 0) return;
@@ -1503,26 +1942,33 @@ chrome.webNavigation.onCommitted.addListener((details) => {
   const tabId = details.tabId;
   const newUrl = details.url;
   const prevUrl = tabCurrentUrl.get(tabId);
+  const transType = details.transitionType || "";
 
   tabCurrentUrl.set(tabId, newUrl);
+  persistTabUrls();
 
-  if (prevUrl) {
-    // Same origin+pathname (hash/query change only) — no clear needed
-    try {
-      const prev = new URL(prevUrl);
-      const next = new URL(newUrl);
-      if (prev.origin === next.origin && prev.pathname === next.pathname) return;
-    } catch { /* malformed URL — treat as changed */ }
+  if (!prevUrl) return;
+
+  const isFullNav = FULL_NAV_TYPES.has(transType);
+
+  try {
+    const prev = new URL(prevUrl);
+    const next = new URL(newUrl);
+    if (prev.origin !== next.origin) {
+      clearTabOnNavigation(tabId, newUrl);
+      return;
+    }
+  } catch {
+    clearTabOnNavigation(tabId, newUrl);
+    return;
   }
 
-  // Either the URL changed, or prevUrl is unknown (SW restarted).
-  // Clear the tab's data — the storage check ensures we only write when needed.
-  clearTabOnNavigation(tabId, newUrl);
+  if (isFullNav) {
+    clearTabOnNavigation(tabId, newUrl);
+  }
 });
 
 function clearTabOnNavigation(tabId, newUrl) {
-  recentlyClearedTabs.add(tabId);
-
   storeViolations();
 
   pendingReports = pendingReports.filter(v => v.tabId !== tabId);
@@ -1530,18 +1976,25 @@ function clearTabOnNavigation(tabId, newUrl) {
   for (const [hash] of recentHashes) {
     if (hash.startsWith(`${tabId}|`)) recentHashes.delete(hash);
   }
+  clearTabClusters(tabId);
+  tabUniqueCounts.delete(tabId);
+  tabTotalCounts.delete(tabId);
 
-  chrome.storage.local.get(["violations"], (result) => {
-    const all = result.violations || [];
-    const kept = all.filter(v => v.tabId !== tabId);
+  enqueueStorageOp(() => new Promise(resolve => {
+    chrome.storage.local.get(["violations"], (result) => {
+      const all = result.violations || [];
+      const kept = all.filter(v => v.tabId !== tabId);
 
-    // Only write if there was actually data to clear
-    if (kept.length !== all.length) {
-      chrome.storage.local.set({ violations: kept }, () => {
-        updateBadge(tabId);
-      });
-    }
-  });
+      if (kept.length !== all.length) {
+        chrome.storage.local.set({ violations: kept }, () => {
+          updateBadge(tabId);
+          resolve();
+        });
+      } else {
+        resolve();
+      }
+    });
+  }));
 
   for (const [port, portTabId] of panelPorts.entries()) {
     if (portTabId === tabId) {
@@ -1552,32 +2005,62 @@ function clearTabOnNavigation(tabId, newUrl) {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabCurrentUrl.delete(tabId);
+  clearTabClusters(tabId);
+  tabUniqueCounts.delete(tabId);
+  tabTotalCounts.delete(tabId);
+  persistTabUrls();
 });
 
 // ── Init ──
 
-chrome.storage.local.get(["monitoringEnabled", "firstPartyAliases"], (result) => {
-  if (result.monitoringEnabled !== undefined) monitoringEnabled = result.monitoringEnabled;
-  if (Array.isArray(result.firstPartyAliases)) firstPartyAliases = result.firstPartyAliases;
-  aliasesReady = true;
-  for (const item of pendingViolationQueue) {
-    processViolation(item.violation, item.tabId);
-  }
-  pendingViolationQueue = [];
-});
+function initBackground() {
+  const sessionStore = chrome.storage.session || chrome.storage.local;
+  chrome.storage.local.get(["monitoringEnabled", "firstPartyAliases"], (localResult) => {
+    if (localResult.monitoringEnabled !== undefined) monitoringEnabled = localResult.monitoringEnabled;
+    else monitoringEnabled = true;
+    if (Array.isArray(localResult.firstPartyAliases)) firstPartyAliases = localResult.firstPartyAliases;
 
-setInterval(storeViolations, 15000);
+    sessionStore.get(["tabCurrentUrl"], (sessResult) => {
+      if (sessResult.tabCurrentUrl && typeof sessResult.tabCurrentUrl === "object") {
+        for (const [k, v] of Object.entries(sessResult.tabCurrentUrl)) {
+          tabCurrentUrl.set(Number(k), v);
+        }
+      }
+
+      initReady = true;
+      const queued = [...pendingViolationQueue];
+      pendingViolationQueue = [];
+      for (const item of queued) {
+        processViolation(item.violation, item.tabId);
+      }
+    });
+  });
+}
+
+initBackground();
+
+chrome.alarms.create(FLUSH_ALARM_NAME, { periodInMinutes: FLUSH_ALARM_PERIOD_MIN });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === FLUSH_ALARM_NAME) {
+    storeViolations();
+  }
+});
 
 chrome.runtime.onStartup.addListener(() => {
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 1);
-  chrome.storage.local.get(["violations"], (result) => {
-    if (!result.violations) return;
-    const filtered = result.violations.filter(v => new Date(v.timestamp) >= cutoff);
-    if (filtered.length !== result.violations.length) {
-      chrome.storage.local.set({ violations: filtered });
-    }
-  });
+  enqueueStorageOp(() => new Promise(resolve => {
+    chrome.storage.local.get(["violations"], (result) => {
+      if (!result.violations) { resolve(); return; }
+      const filtered = result.violations.filter(v => new Date(v.timestamp) >= cutoff);
+      if (filtered.length !== result.violations.length) {
+        chrome.storage.local.set({ violations: filtered }, resolve);
+      } else {
+        resolve();
+      }
+    });
+  }));
 });
 
 console.log("Trusted Types Monitor: Background initialized");

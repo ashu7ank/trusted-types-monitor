@@ -29,6 +29,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     $("#toggle-enabled").addEventListener("change", e => {
       chrome.runtime.sendMessage({ action: "setEnabled", enabled: e.target.checked });
+      if (!e.target.checked) {
+        $("#p-total").textContent = "0";
+        $("#p-critical").textContent = "0";
+        $("#p-clusters").textContent = "0";
+        safeClear($("#type-breakdown"));
+        safeHTML($("#recent-list"), '<div class="empty">Monitoring paused.</div>');
+      }
     });
 
     $("#btn-export").addEventListener("click", () => {
@@ -62,8 +69,8 @@ document.addEventListener("DOMContentLoaded", () => {
         $("#p-total").textContent = "0";
         $("#p-critical").textContent = "0";
         $("#p-clusters").textContent = "0";
-        $("#type-breakdown").innerHTML = "";
-        $("#recent-list").innerHTML = '<div class="empty">Cleared.</div>';
+        safeClear($("#type-breakdown"));
+        safeHTML($("#recent-list"), '<div class="empty">Cleared.</div>');
       });
     });
   });
@@ -82,21 +89,21 @@ function renderBreakdown(violations) {
   violations.forEach(v => { counts[v.violationType] = (counts[v.violationType] || 0) + 1; });
   const total = violations.length || 1;
   const el = $("#type-breakdown");
-  el.innerHTML = [
+  safeHTML(el, [
     { cls: "tb-html", n: counts.TrustedHTML },
     { cls: "tb-script", n: counts.TrustedScript },
     { cls: "tb-url", n: counts.TrustedScriptURL },
     { cls: "tb-unknown", n: counts.Unknown }
   ].filter(x => x.n > 0).map(x =>
     `<div class="tb-bar ${x.cls}" style="width:${Math.max(2, (x.n / total) * 100)}%" title="${x.cls.replace('tb-','')} (${x.n})"></div>`
-  ).join("");
+  ).join(""));
 }
 
 function renderRecent(violations) {
   const el = $("#recent-list");
-  if (!violations.length) { el.innerHTML = '<div class="empty">No violations on this tab yet.</div>'; return; }
+  if (!violations.length) { safeHTML(el, '<div class="empty">No violations on this tab yet.</div>'); return; }
   const recent = violations.slice(-8).reverse();
-  el.innerHTML = recent.map(v => {
+  safeHTML(el, recent.map(v => {
     const bc = { TrustedHTML: "ri-html", TrustedScript: "ri-script", TrustedScriptURL: "ri-url" }[v.violationType] || "ri-unknown";
     const sample = (v.sample || "").substring(0, 50);
     const time = new Date(v.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -105,7 +112,7 @@ function renderRecent(violations) {
       <span class="ri-text" title="${esc(v.sample || "")}">${esc(sample)}</span>
       <span class="ri-time">${time}</span>
     </div>`;
-  }).join("");
+  }).join(""));
 }
 
 function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
