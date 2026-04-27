@@ -49,7 +49,7 @@
             sample: report["script-sample"] || "unknown",
             detectedVia: source
           }
-        }, "*");
+        }, document.location.origin);
       }
     } catch {}
   }
@@ -68,7 +68,7 @@
               observedRequest: entry.name,
               initiatorType: entry.initiatorType
             }
-          }, "*");
+          }, document.location.origin);
         }
       }
     }).observe({ entryTypes: ['resource'] });
