@@ -6,16 +6,18 @@ const AI_PROVIDERS = {
   gpt: { name: "GPT", endpoint: "https://api.openai.com/v1/chat/completions", model: "gpt-4o-mini" }
 };
 
-const AI_REQUEST_TIMEOUT_MS = 30000;
+const AI_REQUEST_TIMEOUT_MS = 120000;
+const MODELS_REQUEST_TIMEOUT_MS = 15000;
 
-async function fetchWithTimeout(url, options) {
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const ms = timeoutMs || AI_REQUEST_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), ms);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (err) {
     if (err.name === "AbortError") {
-      throw new Error(`Request timed out after ${AI_REQUEST_TIMEOUT_MS / 1000}s — the AI provider may be slow or unreachable.`);
+      throw new Error(`Request timed out after ${ms / 1000}s — the AI provider may be slow or unreachable.`);
     }
     throw err;
   } finally {
@@ -29,6 +31,69 @@ function detectProvider(key) {
   if (key.startsWith("sk-proj-") || key.startsWith("sk-")) return "gpt";
   if (key.startsWith("AIza")) return "gemini";
   return "gemini";
+}
+
+async function fetchModels(apiKey, provider) {
+  const det = provider || detectProvider(apiKey);
+  if (!det || !apiKey) throw new Error("API key and provider are required.");
+
+  switch (det) {
+    case "gpt": {
+      const r = await fetchWithTimeout("https://api.openai.com/v1/models", {
+        method: "GET",
+        headers: { "Authorization": `Bearer ${apiKey}` }
+      }, MODELS_REQUEST_TIMEOUT_MS);
+      if (r.status === 401 || r.status === 403) throw new Error("Invalid or expired API key.");
+      if (r.status === 429) throw new Error("Rate limited — wait a moment and retry.");
+      if (!r.ok) throw new Error(`OpenAI API error ${r.status}: ${(await r.text()).substring(0, 200)}`);
+      const json = await r.json();
+      return (json.data || [])
+        .filter(m => !m.id.startsWith("embedding") && !m.id.includes("whisper") && !m.id.includes("tts") && !m.id.includes("dall-e"))
+        .map(m => ({ id: m.id, name: m.id }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    case "gemini": {
+      const r = await fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+        { method: "GET" },
+        MODELS_REQUEST_TIMEOUT_MS
+      );
+      if (r.status === 401 || r.status === 403) throw new Error("Invalid or expired API key.");
+      if (r.status === 429) throw new Error("Rate limited — wait a moment and retry.");
+      if (!r.ok) throw new Error(`Gemini API error ${r.status}: ${(await r.text()).substring(0, 200)}`);
+      const json = await r.json();
+      const BLOCK_PATTERNS = [
+        "deep-research", "imagen", "veo", "lyria",
+        "embedding", "aqa", "bison", "gecko"
+      ];
+      return (json.models || [])
+        .filter(m => {
+          if (!m.name) return false;
+          const id = m.name.replace("models/", "").toLowerCase();
+          if (BLOCK_PATTERNS.some(p => id.includes(p))) return false;
+          if (!Array.isArray(m.supportedGenerationMethods)) return false;
+          return m.supportedGenerationMethods.includes("generateContent");
+        })
+        .map(m => {
+          const id = m.name.replace("models/", "");
+          return { id, name: m.displayName || id };
+        })
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    case "claude":
+      return [
+        { id: "claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
+        { id: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet" },
+        { id: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku" },
+        { id: "claude-3-opus-20240229", name: "Claude 3 Opus" },
+        { id: "claude-3-haiku-20240307", name: "Claude 3 Haiku" }
+      ];
+
+    default:
+      throw new Error(`Unknown provider: ${det}`);
+  }
 }
 
 const SYSTEM = `You are a Trusted Types security expert embedded in the TT Monitor Chrome DevTools extension. Help developers fix Trusted Types violations using the analysis data this extension has already computed.
@@ -137,13 +202,11 @@ function buildAnalysisContext(analysis) {
   return sections.length > 0 ? "\n" + sections.join("\n") : "";
 }
 
-// Single-turn (for popup backward compat)
 async function queryAI(apiKey, provider, violations, question, analysis) {
   return queryAIMultiTurn(apiKey, provider, violations, [{ role: "user", content: question || "Analyze these violations." }], analysis);
 }
 
-// Multi-turn with conversation history
-async function queryAIMultiTurn(apiKey, provider, violations, history, analysis) {
+async function queryAIMultiTurn(apiKey, provider, violations, history, analysis, model) {
   const det = provider || detectProvider(apiKey);
   if (!det) throw new Error("Cannot detect provider from key.");
 
@@ -152,44 +215,64 @@ async function queryAIMultiTurn(apiKey, provider, violations, history, analysis)
   const sysWithCtx = SYSTEM + "\n\n" + ctx + analysisCtx;
 
   switch (det) {
-    case "claude": return callClaude(apiKey, sysWithCtx, history);
-    case "gemini": return callGemini(apiKey, sysWithCtx, history);
-    case "gpt": return callGPT(apiKey, sysWithCtx, history);
+    case "claude": return callClaude(apiKey, sysWithCtx, history, model);
+    case "gemini": return callGemini(apiKey, sysWithCtx, history, model);
+    case "gpt": return callGPT(apiKey, sysWithCtx, history, model);
     default: throw new Error(`Unknown provider: ${det}`);
   }
 }
 
-async function callClaude(apiKey, system, history) {
+async function callClaude(apiKey, system, history, model) {
   const messages = history.map(m => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content }));
   const r = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
-    body: JSON.stringify({ model: AI_PROVIDERS.claude.model, max_tokens: 4096, system, messages })
+    body: JSON.stringify({ model: model || AI_PROVIDERS.claude.model, max_tokens: 4096, system, messages })
   });
-  if (!r.ok) throw new Error(`Claude ${r.status}: ${await r.text()}`);
-  return (await r.json()).content[0].text;
+  if (r.status === 401 || r.status === 403) throw new Error("Invalid or expired API key.");
+  if (r.status === 429) throw new Error("Rate limited — wait a moment and retry.");
+  if (!r.ok) throw new Error(`Claude API ${r.status}: ${(await r.text()).substring(0, 200)}`);
+  const json = await r.json();
+  if (!json.content || !json.content[0] || !json.content[0].text) {
+    throw new Error("Unexpected response format from Claude API.");
+  }
+  return json.content[0].text;
 }
 
-async function callGemini(apiKey, system, history) {
+async function callGemini(apiKey, system, history, model) {
   const contents = history.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
-  const r = await fetchWithTimeout(`${AI_PROVIDERS.gemini.endpoint}?key=${apiKey}`, {
+  const modelId = model || AI_PROVIDERS.gemini.model;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+  const r = await fetchWithTimeout(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ system_instruction: { parts: [{ text: system }] }, contents, generationConfig: { maxOutputTokens: 4096 } })
   });
-  if (!r.ok) throw new Error(`Gemini ${r.status}: ${await r.text()}`);
-  return (await r.json()).candidates[0].content.parts[0].text;
+  if (r.status === 401 || r.status === 403) throw new Error("Invalid or expired API key.");
+  if (r.status === 429) throw new Error("Rate limited — wait a moment and retry.");
+  if (!r.ok) throw new Error(`Gemini API ${r.status}: ${(await r.text()).substring(0, 200)}`);
+  const json = await r.json();
+  if (!json.candidates || !json.candidates[0] || !json.candidates[0].content) {
+    throw new Error("Unexpected response format from Gemini API.");
+  }
+  return json.candidates[0].content.parts[0].text;
 }
 
-async function callGPT(apiKey, system, history) {
+async function callGPT(apiKey, system, history, model) {
   const messages = [{ role: "system", content: system }, ...history.map(m => ({ role: m.role, content: m.content }))];
   const r = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: AI_PROVIDERS.gpt.model, max_tokens: 4096, messages })
+    body: JSON.stringify({ model: model || AI_PROVIDERS.gpt.model, max_tokens: 4096, messages })
   });
-  if (!r.ok) throw new Error(`GPT ${r.status}: ${await r.text()}`);
-  return (await r.json()).choices[0].message.content;
+  if (r.status === 401 || r.status === 403) throw new Error("Invalid or expired API key.");
+  if (r.status === 429) throw new Error("Rate limited — wait a moment and retry.");
+  if (!r.ok) throw new Error(`OpenAI API ${r.status}: ${(await r.text()).substring(0, 200)}`);
+  const json = await r.json();
+  if (!json.choices || !json.choices[0] || !json.choices[0].message) {
+    throw new Error("Unexpected response format from OpenAI API.");
+  }
+  return json.choices[0].message.content;
 }
 
-window.AIAssistant = { AI_PROVIDERS, detectProvider, queryAI, queryAIMultiTurn };
+window.AIAssistant = { AI_PROVIDERS, detectProvider, fetchModels, queryAI, queryAIMultiTurn };
