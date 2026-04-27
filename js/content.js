@@ -46,7 +46,7 @@ if (window.ReportingObserver) {
 }
 
 // Bridge: receive violations from MAIN world content-main.js
-// Validates structure to prevent arbitrary injection from page scripts.
+// Validates structure and types to prevent arbitrary injection from page scripts.
 window.addEventListener('message', (event) => {
   if (!chrome.runtime?.id) return;
   if (event.source !== window || event.data?.type !== '__tt_monitor__') return;
@@ -55,7 +55,11 @@ window.addEventListener('message', (event) => {
   if (!v || typeof v !== 'object' || Array.isArray(v)) return;
   if (typeof v.directive !== 'string' || !v.directive.includes('trusted-types')) return;
 
-  const str = (val, fallback) => typeof val === 'string' ? val : fallback;
+  const str = (val, fallback, maxLen = 2000) =>
+    typeof val === 'string' ? val.substring(0, maxLen) : fallback;
+  const num = (val, fallback) =>
+    (typeof val === 'number' && Number.isFinite(val)) ? val : fallback;
+
   chrome.runtime.sendMessage({
     action: "reportViolation",
     violation: {
@@ -64,8 +68,8 @@ window.addEventListener('message', (event) => {
       directive: v.directive,
       blockedUri: str(v.blockedUri, "unknown"),
       sourceFile: str(v.sourceFile, "unknown"),
-      lineNumber: v.lineNumber || "unknown",
-      columnNumber: v.columnNumber || "unknown",
+      lineNumber: num(v.lineNumber, "unknown"),
+      columnNumber: num(v.columnNumber, "unknown"),
       sample: str(v.sample, "unknown"),
       stackTrace: str(v.stackTrace, ""),
       detectedVia: str(v.detectedVia, "postMessage")
@@ -76,6 +80,26 @@ window.addEventListener('message', (event) => {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "checkTrustedTypesSupport") {
     sendResponse({ supported: typeof window.trustedTypes !== 'undefined' });
+    return true;
   }
+
+  if (request.action === "sanitizeHTML") {
+    const raw = typeof request.html === 'string' ? request.html.substring(0, 50000) : '';
+    if (!raw) {
+      sendResponse({ sanitized: '', error: null });
+      return true;
+    }
+    if (typeof DOMPurify !== 'undefined') {
+      try {
+        sendResponse({ sanitized: DOMPurify.sanitize(raw), error: null });
+      } catch (e) {
+        sendResponse({ sanitized: '', error: e.message });
+      }
+    } else {
+      sendResponse({ sanitized: '', error: 'DOMPurify not loaded' });
+    }
+    return true;
+  }
+
   return true;
 });
