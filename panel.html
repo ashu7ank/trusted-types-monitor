@@ -9,33 +9,34 @@
   <div class="panel-app">
     <header class="panel-header">
       <div class="hdr-left">
-        <h1>TT Monitor</h1>
+        <h1>&#x1f6e1; TT Monitor</h1>
         <label class="toggle-switch" title="Enable/disable monitoring">
           <input type="checkbox" id="monitoring-toggle" checked>
           <span class="toggle-slider"></span>
         </label>
       </div>
       <div class="hdr-stats">
-        <div class="hstat"><span id="s-total" class="hstat-num">0</span><span class="hstat-lbl">total</span></div>
+        <div class="hstat"><span id="s-unique" class="hstat-num">0</span><span class="hstat-lbl">unique</span></div>
+        <div class="hstat" id="hstat-total-occ"><span id="s-total-occ" class="hstat-num hstat-dim">0</span><span class="hstat-lbl">total</span></div>
         <div class="hstat"><span id="s-html" class="hstat-num type-c-html">0</span><span class="hstat-lbl">HTML</span></div>
         <div class="hstat"><span id="s-script" class="hstat-num type-c-script">0</span><span class="hstat-lbl">Script</span></div>
         <div class="hstat"><span id="s-url" class="hstat-num type-c-url">0</span><span class="hstat-lbl">URL</span></div>
         <div class="hstat"><span id="s-clusters" class="hstat-num">0</span><span class="hstat-lbl">clusters</span></div>
       </div>
       <div class="hdr-actions">
-        <input type="text" id="search-input" placeholder="Filter violations..." class="search-box">
-        <button class="hdr-btn" id="btn-export" title="Export">Export</button>
+        <input type="text" id="search-input" placeholder="&#x1f50d; Filter violations..." class="search-box">
+        <button class="hdr-btn" id="btn-export" title="Export violations as JSON">Export</button>
         <button class="hdr-btn danger" id="btn-clear" title="Clear tab violations">Clear</button>
       </div>
     </header>
 
     <nav class="panel-tabs">
-      <button class="ptab active" data-tab="live">Live Stream</button>
-      <button class="ptab" data-tab="clusters">Clusters</button>
-      <button class="ptab" data-tab="insights">Insights</button>
-      <button class="ptab" data-tab="fix">Fix Guide</button>
-      <button class="ptab" data-tab="policy">Policy Gen</button>
-      <button class="ptab" data-tab="ai">AI Assist</button>
+      <button class="ptab active" data-tab="live">&#x25cf; Live Stream</button>
+      <button class="ptab" data-tab="clusters">&#x229e; Clusters</button>
+      <button class="ptab" data-tab="insights">&#x2609; Insights</button>
+      <button class="ptab" data-tab="fix">&#x2692; Fix Guide</button>
+      <button class="ptab" data-tab="policy">&#x2699; Policy Gen</button>
+      <button class="ptab" data-tab="ai">&#x2604; AI Assist</button>
     </nav>
 
     <!-- Live Stream -->
@@ -56,6 +57,7 @@
           <tbody id="live-body"></tbody>
         </table>
       </div>
+      <div class="pagination-bar" id="pagination-controls"></div>
     </div>
 
     <!-- Clusters -->
@@ -69,7 +71,7 @@
 
         <!-- Origin Analysis -->
         <section class="ins-section" id="ins-origin">
-          <h3 class="ins-title">Origin Analysis <span class="ins-subtitle">First-party vs Third-party</span></h3>
+          <h3 class="ins-title">&#x1f310; Origin Analysis <span class="ins-subtitle">First-party vs Third-party breakdown</span></h3>
           <div class="ins-origin-summary" id="origin-summary"></div>
           <div class="ins-origin-bar" id="origin-bar"></div>
           <div id="origin-details"></div>
@@ -92,31 +94,31 @@
 
         <!-- Sink Map -->
         <section class="ins-section" id="ins-sinks">
-          <h3 class="ins-title">Sink Map <span class="ins-subtitle">Which DOM sinks are triggered and where</span></h3>
+          <h3 class="ins-title">&#x1f5fa; Sink Map <span class="ins-subtitle">Which DOM sinks are triggered and where</span></h3>
           <div id="sink-map-content"></div>
         </section>
 
         <!-- Framework Detection -->
         <section class="ins-section" id="ins-frameworks">
-          <h3 class="ins-title">Framework Detection <span class="ins-subtitle">Detected libraries and tailored guidance</span></h3>
+          <h3 class="ins-title">&#x2699; Framework Detection <span class="ins-subtitle">Detected libraries and tailored guidance</span></h3>
           <div id="framework-content"></div>
         </section>
 
         <!-- Scatter & Centralization -->
         <section class="ins-section" id="ins-scatter">
-          <h3 class="ins-title">Centralization Analysis <span class="ins-subtitle">Policy scatter detection</span></h3>
+          <h3 class="ins-title">&#x1f4ca; Centralization Analysis <span class="ins-subtitle">Policy scatter detection</span></h3>
           <div id="scatter-content"></div>
         </section>
 
         <!-- Named Policy Recommendations -->
         <section class="ins-section" id="ins-named-policies">
-          <h3 class="ins-title">Named Policy Recommendations <span class="ins-subtitle">Suggested policies based on violations</span></h3>
+          <h3 class="ins-title">&#x1f4dc; Named Policy Recommendations <span class="ins-subtitle">Suggested policies based on violations</span></h3>
           <div id="named-policies-content"></div>
         </section>
 
         <!-- CSP Header Generator -->
         <section class="ins-section" id="ins-csp">
-          <h3 class="ins-title">CSP Header Generator <span class="ins-subtitle">Production-ready Content-Security-Policy</span></h3>
+          <h3 class="ins-title">&#x1f512; CSP Header Generator <span class="ins-subtitle">Production-ready Content-Security-Policy</span></h3>
           <div id="csp-content"></div>
         </section>
 
@@ -134,7 +136,7 @@
         </div>
       </div>
       <div id="fix-detail" class="hidden">
-        <button class="back-link" id="fix-back">&larr; Back</button>
+        <button class="back-link" id="fix-back">&larr; Back to overview</button>
         <div id="fix-detail-body"></div>
       </div>
     </div>
@@ -162,15 +164,20 @@
     <!-- AI Assist -->
     <div class="ptab-content" id="pt-ai">
       <div id="ai-setup-panel">
-        <h2>AI-Powered Analysis</h2>
-        <p>Provide your API key to enable AI analysis. Supports Claude, Gemini, and GPT.</p>
+        <h2>&#x2604; AI-Powered Analysis</h2>
+        <p>Enter your API key to enable AI analysis. Choose from Claude (Anthropic), Gemini (Google), or GPT (OpenAI).</p>
         <div class="ai-form">
-          <select id="ai-provider"><option value="auto">Auto-detect</option><option value="claude">Claude</option><option value="gemini">Gemini</option><option value="gpt">GPT</option></select>
+          <select id="ai-provider">
+            <option value="auto">Auto-detect</option>
+            <option value="claude">Claude</option>
+            <option value="gemini">Gemini</option>
+            <option value="gpt">GPT</option>
+          </select>
           <div class="ai-key-row">
             <input type="password" id="ai-key" placeholder="API key...">
             <button class="hdr-btn" id="ai-eye">&#128065;</button>
           </div>
-          <p class="hint">Stored locally. Only sent to the selected provider.</p>
+          <p class="hint">Stored locally. Only sent to the AI provider you select above.</p>
           <button class="hdr-btn primary" id="ai-save">Save & Connect</button>
           <div id="ai-status" class="hidden"></div>
         </div>
@@ -180,16 +187,22 @@
           <span id="ai-connected-label">Connected</span>
           <button class="hdr-btn small" id="ai-settings">Settings</button>
         </div>
+        <div id="ai-model-bar" class="hidden">
+          <label for="ai-model">Model:</label>
+          <select id="ai-model"><option value="">Default</option></select>
+          <button class="hdr-btn small" id="ai-model-save">Apply</button>
+          <button class="hdr-btn small" id="ai-model-close">&times;</button>
+        </div>
         <div class="ai-messages" id="ai-messages">
-          <div class="ai-msg bot"><p>Ready to help. Use quick actions or ask a question.</p></div>
+          <div class="ai-msg bot"><p>Ready to help. Use quick actions below or ask a question.</p></div>
         </div>
         <div class="ai-bottom">
           <div class="ai-quick">
-            <button class="qbtn" data-q="Analyze all violations by sink type and origin, prioritize fixes starting with first-party code">Analyze All</button>
-            <button class="qbtn" data-q="Review the recommended named policies and CSP header — are they sufficient for the observed violations?">Review Policies</button>
-            <button class="qbtn" data-q="Which violations are most critical? Consider sink severity, origin (first vs third party), and scatter across source files">Critical</button>
-            <button class="qbtn" data-q="Explain third-party risks and recommend wrapper policies or library alternatives for the detected third-party origins">3rd Party Risks</button>
-            <button class="qbtn" data-q="Based on the scatter analysis and detected frameworks, recommend a centralization strategy with framework-specific patterns">Centralize</button>
+            <button class="qbtn" data-q="Analyze all violations by sink type and origin, prioritize fixes starting with first-party code">&#x1f50d; Analyze All</button>
+            <button class="qbtn" data-q="Review the recommended named policies and CSP header — are they sufficient for the observed violations?">&#x1f4dc; Review Policies</button>
+            <button class="qbtn" data-q="Which violations are most critical? Consider sink severity, origin (first vs third party), and scatter across source files">&#x26a0; Critical</button>
+            <button class="qbtn" data-q="Explain third-party risks and recommend wrapper policies or library alternatives for the detected third-party origins">&#x1f310; 3rd Party Risks</button>
+            <button class="qbtn" data-q="Based on the scatter analysis and detected frameworks, recommend a centralization strategy with framework-specific patterns">&#x2699; Centralize</button>
           </div>
           <div class="ai-input-row">
             <textarea id="ai-input" rows="2" placeholder="Ask about violations..."></textarea>
@@ -213,6 +226,7 @@
     </div>
   </div>
 
+  <script src="js/tt-policy.js"></script>
   <script src="js/ai-assistant.js"></script>
   <script src="js/panel.js"></script>
 </body>
