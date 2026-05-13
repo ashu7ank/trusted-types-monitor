@@ -7,20 +7,20 @@
 
 # Trusted Types Monitor
 
-> A Chrome DevTools extension that **monitors, analyzes, and helps fix** [Trusted Types](https://developer.mozilla.org/en-US/docs/Web/API/Trusted_Types_API) CSP violations in real time — with clustering, one-click fix guidance, auto-generated policies, and optional AI-powered analysis.
+> A Chrome DevTools extension that **monitors, analyzes, and helps fix** [Trusted Types](https://developer.mozilla.org/en-US/docs/Web/API/Trusted_Types_API) CSP violations in real time - with clustering, one-click fix guidance, auto-generated policies, and optional AI-powered analysis.
 
 ---
 
 
 ## Why This Extension?
 
-Trusted Types is the browser's built-in defense against DOM XSS — the most common class of web vulnerability. But adopting it is hard:
+Trusted Types is the browser's built-in defense against DOM XSS - the most common class of web vulnerability. But adopting it is hard:
 
-- **Discovery is painful** — violations are buried in console noise and CSP report endpoints.
-- **Root-cause analysis is manual** — you have to map each violation back to source code yourself.
-- **Migration is daunting** — rewriting every `innerHTML`, `eval`, and `document.write` call takes significant effort.
+- **Discovery is painful** - violations are buried in console noise and CSP report endpoints.
+- **Root-cause analysis is manual** - you have to map each violation back to source code yourself.
+- **Migration is daunting** - rewriting every `innerHTML`, `eval`, and `document.write` call takes significant effort.
 
-**Trusted Types Monitor** automates all three stages: it **captures** every violation the moment it fires, **clusters** them by root cause so you know what to fix first, and **generates** the exact policy code you need — all inside a dedicated DevTools panel.
+**Trusted Types Monitor** automates all three stages: it **captures** every violation the moment it fires, **clusters** them by root cause so you know what to fix first, and **generates** the exact policy code you need - all inside a dedicated DevTools panel.
 
 ---
 
@@ -33,7 +33,7 @@ Trusted Types is the browser's built-in defense against DOM XSS — the most com
 - Automatic type classification: **TrustedHTML**, **TrustedScript**, **TrustedScriptURL**
 - Per-tab tracking with deduplication (2-second window) and auto-clear on navigation
 
-### DevTools Panel — Live Stream
+### DevTools Panel - Live Stream
 - Real-time violation feed with instant push updates via long-lived background connection
 - Sortable columns, full-text search/filter across all fields
 - **Sink-to-source mapping**: extracts the exact DOM sink (e.g. `Element.innerHTML`, `eval()`, `HTMLScriptElement.src`) and shows it in the **Sink** column
@@ -55,7 +55,7 @@ Trusted Types is the browser's built-in defense against DOM XSS — the most com
 - **Framework-aware suggestions**: detects common frameworks from violation sources/stack traces (React, Angular, Vue, jQuery, Svelte, Next.js, Nuxt, Webpack) and shows tailored fix patterns
 - Reference links to MDN, web.dev, OWASP, and W3C specs
 
-### Insights — Deep Analysis
+### Insights - Deep Analysis
 - **Origin Analysis**: first-party vs third-party breakdown + top third-party origins
 - **First-Party Domain Aliases**: treat organization-owned CDNs/asset hosts as first-party (with **Auto-Suggest** to detect likely internal CDNs from captured violations)
 - **Sink Map**: groups violations by sink type and shows source locations (file:line:col) where available
@@ -64,8 +64,8 @@ Trusted Types is the browser's built-in defense against DOM XSS — the most com
 - **CSP Header Generator**: production-ready CSP headers (Report-Only first, enforcing, meta tag, Nginx, Apache) derived from recommended named policies
 
 ### Policy Generator
-- **Standard mode** — analyzes observed violations to generate a practical `trustedTypes.createPolicy('default', ...)` with HTML tag/attribute extraction, URL origin allowlists, and script pattern cataloging
-- **Perfect Types mode** — migration-oriented guide pushing toward **zero-policy** Trusted Types using `Element.setHTML()` + the Sanitizer API, with fallback named-policy suggestions only where unavoidable
+- **Standard mode** - analyzes observed violations to generate a practical `trustedTypes.createPolicy('default', ...)` with HTML tag/attribute extraction, URL origin allowlists, and script pattern cataloging
+- **Perfect Types mode** - migration-oriented guide pushing toward **zero-policy** Trusted Types using `Element.setHTML()` + the Sanitizer API, with fallback named-policy suggestions only where unavoidable
 - Security warnings for dangerous patterns, one-click copy
 
 ### AI Assistant (Optional)
@@ -126,13 +126,13 @@ If your app loads scripts from organization-owned domains that don’t match the
 1. Open **Insights** → **Origin Analysis**
 2. Under **First-Party Domain Aliases**, click **Auto-Suggest** (recommended), or add domains manually
 3. The Live Stream origin badges, Origin Analysis, Scatter Analysis, and AI context will refresh to match the new classification (debounced during rapid bursts to keep the panel responsive)
-   - You can paste a bare hostname (e.g. `cdn.internal.example`) or a full URL — the host is normalized and validated
+   - You can paste a bare hostname (e.g. `cdn.internal.example`) or a full URL - the host is normalized and validated
    - Existing captured violations are reclassified when state is refreshed, so you don’t need to wait for new violations to see the impact
 
 ### AI Analysis
 1. Open the **AI Assist** tab
 2. Enter your API key (Claude, Gemini, or GPT)
-3. Use quick actions or ask questions — multi-turn context is maintained
+3. Use quick actions or ask questions - multi-turn context is maintained
 
 ### Exporting Data
 - In the **DevTools panel**, click **Export** to download a JSON snapshot (violations + clusters metadata).
@@ -173,21 +173,21 @@ trusted-types-monitor/
 |---|:---:|:---:|
 | Violation count (tab / all) | Yes | Yes |
 | Type breakdown bar | Yes | Yes |
-| Recent violations (last 8) | Yes | — |
-| Live violation stream | — | Yes |
-| Sink-to-source mapping (Sink column) | — | Yes |
-| First-party vs third-party badges | — | Yes |
-| Search / filter | — | Yes |
-| Violation detail sidebar | — | Yes |
-| Clustering by root cause | — | Yes |
-| Fix guidance engine | — | Yes |
-| Framework detection + tailored guidance | — | Yes |
-| Origin analysis + alias configuration | — | Yes |
-| Scatter analysis + centralization recommendation | — | Yes |
-| Named policy recommendations + centralized module | — | Yes |
-| CSP header generator | — | Yes |
-| Policy generator | — | Yes |
-| AI assistant | — | Yes |
+| Recent violations (last 8) | Yes | - |
+| Live violation stream | - | Yes |
+| Sink-to-source mapping (Sink column) | - | Yes |
+| First-party vs third-party badges | - | Yes |
+| Search / filter | - | Yes |
+| Violation detail sidebar | - | Yes |
+| Clustering by root cause | - | Yes |
+| Fix guidance engine | - | Yes |
+| Framework detection + tailored guidance | - | Yes |
+| Origin analysis + alias configuration | - | Yes |
+| Scatter analysis + centralization recommendation | - | Yes |
+| Named policy recommendations + centralized module | - | Yes |
+| CSP header generator | - | Yes |
+| Policy generator | - | Yes |
+| AI assistant | - | Yes |
 | Export | CSV | JSON |
 | Clear violations | Yes | Yes |
 | On / off toggle | Yes | Yes |
@@ -196,7 +196,7 @@ trusted-types-monitor/
 
 ## Privacy
 
-- All data stored locally in `chrome.storage.local` — nothing leaves your machine by default
+- All data stored locally in `chrome.storage.local` - nothing leaves your machine by default
 - AI features are **opt-in**: you provide your own API key, and requests go directly to the provider you choose
 - MAIN world content script only inspects Trusted Types report POST bodies; it does not collect general browsing data
 - The extension runs CSP in **Report-Only** mode, so it observes but never blocks page behavior
@@ -205,7 +205,7 @@ trusted-types-monitor/
 
 ## Important Note
 
-Running in Report-Only mode means pages will attempt to POST CSP reports to `/trusted-types-violation`, which may appear as 404s in the target site's network or server logs. This is expected behavior — the extension intercepts these reports locally.
+Running in Report-Only mode means pages will attempt to POST CSP reports to `/trusted-types-violation`, which may appear as 404s in the target site's network or server logs. This is expected behavior - the extension intercepts these reports locally.
 
 ---
 
