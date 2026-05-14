@@ -208,6 +208,10 @@ trusted-types-monitor/
 Running in Report-Only mode means pages will attempt to POST CSP reports to `/trusted-types-violation`, which may appear as 404s in the target site's network or server logs. This is expected behavior - the extension intercepts these reports locally.
 
 ---
+## Inspired By
+
+- [Trusted Types Helper](https://github.com/google/trusted-types-helper) by Google
+- [Perfect Types with setHTML](https://frederikbraun.de/perfect-types-with-sethtml.html) by Frederik Braun
 
 ## License
 
